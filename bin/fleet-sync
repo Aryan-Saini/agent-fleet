@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# fleet-sync: receive config from the controller. Workers only. One way, by design.
+#
+#   fleet sync             make every repo in FLEET_SYNC_REPOS match origin/main, then relink
+#   fleet sync --status    report only, change nothing
+#
+# The controller is the only machine that authors config: rules, skills, this repo. Workers
+# receive. Each repo is reset --hard to origin/main, so a stray edit on a worker can never fork
+# the fleet's brain. The edit is not lost: it is saved to refs/fleet-local/* first.
+#
+# FLEET_SYNC_REPOS (in fleet.env) lists extra checkouts as "path|clone-url" pairs, for people
+# who keep agent config in separate dot-repos. This fleet repo itself is always synced.
+set -uo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=fleet-lib.sh
+. "$(dirname "$self")/fleet-lib.sh"
+
+STATUS_ONLY=0
+[ "${1:-}" = --status ] && STATUS_ONLY=1
+if [ "$FLEET_ROLE" = controller ] && [ "$STATUS_ONLY" = 0 ]; then
+  fleet_die "this is the controller. It authors config: commit and push instead of syncing"
+fi
+
+ALERT="$FLEET_DROP/FLEET-SYNC-$FLEET_NAME.txt"
+PROBLEMS=()
+note() { printf '%s\n' "$*"; fleet_log sync "$*"; }
+bad()  { PROBLEMS+=("$1"); fleet_log sync "PROBLEM $1"; }
+
+entries=("$FLEET_HOME|")
+for e in ${FLEET_SYNC_REPOS:-}; do p="${e%%|*}"; entries+=("${p/#\~/$HOME}|${e#*|}"); done
+
+for entry in "${entries[@]}"; do
+  dest="${entry%%|*}"; url="${entry#*|}"; name="$(basename "$dest")"
+
+  # Bootstrap: attach a repo to a directory that already holds live state (credentials,
+  # sessions). Only tracked files are written; untracked state survives.
+  if [ ! -d "$dest/.git" ]; then
+    if [ -z "$url" ] || [ "$STATUS_ONLY" = 1 ]; then note "$name: not a git checkout at $dest"; continue; fi
+    note "$name: bootstrapping at $dest"
+    mkdir -p "$dest"
+    ( cd "$dest" && git init -q -b main && git remote add origin "$url" &&
+      git fetch -q --depth=1 origin main && git reset -q --hard origin/main &&
+      git branch -q --set-upstream-to=origin/main main ) || bad "$name: bootstrap failed"
+    continue
+  fi
+
+  cd "$dest" || { bad "$name: cannot cd to $dest"; continue; }
+  if [ "$STATUS_ONLY" = 1 ]; then
+    note "$name: $(git rev-parse --short HEAD) dirty=$(git status --porcelain | wc -l | tr -d ' ')"
+    continue
+  fi
+  git fetch -q origin 2>/dev/null || { bad "$name: fetch failed (network or auth)"; continue; }
+
+  if [ -n "$(git status --porcelain)" ]; then
+    saved="refs/fleet-local/$(date +%Y%m%d-%H%M%S)"
+    if tree="$(git stash create 2>/dev/null)" && [ -n "$tree" ]; then
+      git update-ref "$saved" "$tree"
+      note "$name: local edits saved to $saved (recover: git -C $dest stash apply $saved)"
+    fi
+  fi
+  if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main 2>/dev/null)" ] && [ -z "$(git status --porcelain)" ]; then
+    continue
+  fi
+  # `git clean` without -x: ignored machine state (settings, sessions, history) is left alone.
+  if git reset -q --hard origin/main && git clean -qfd; then
+    note "$name: now at $(git rev-parse --short HEAD)"
+  else
+    bad "$name: reset to origin/main failed"
+  fi
+done
+
+[ "$STATUS_ONLY" = 1 ] && exit 0
+"$FLEET_HOME/bin/fleet-link" --quiet || bad "fleet link failed after sync"
+
+if [ "${#PROBLEMS[@]}" -eq 0 ]; then rm -f "$ALERT"; exit 0; fi
+mkdir -p "$FLEET_DROP"
+{ echo "FLEET SYNC ALERT: $FLEET_NAME, $(date '+%Y-%m-%d %H:%M:%S')"; echo
+  for p in ${PROBLEMS[@]+"${PROBLEMS[@]}"}; do echo "  - $p"; done
+  echo; echo "Log: $FLEET_LOGS/sync.log"; } > "$ALERT"
+"$FLEET_HOME/bin/fleet-alert" "config sync" "$(printf '%s; ' ${PROBLEMS[@]+"${PROBLEMS[@]}"})"
+exit 1

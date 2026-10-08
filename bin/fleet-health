@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# fleet-health: the watchdog. Runs every enabled package's check, heals what is safe, reports
+# the rest. A timer runs it every 15 min on workers, and again after every boot or resume.
+#
+#   fleet health            check, heal, report
+#   fleet health --probe    also run the expensive checks (live agent login probes)
+#   fleet health --quiet    no stdout, just the log, the alert file and the alert
+#
+# Checks are packages/<name>/check.sh for each name in FLEET_PACKAGES, plus any executable in
+# ~/.config/fleet/checks.d/ for machine-local checks. The contract for a check:
+#   check.sh          exit 0 healthy; exit 1 broken, one line on stdout saying what is wrong
+#   check.sh --heal   try a safe, idempotent fix. Optional; the runner re-checks afterwards
+# FLEET_PROBE=1 is exported on --probe so a check can skip slow work otherwise.
+#
+# Problems land in $FLEET_DROP/FLEET-HEALTH-<machine>.txt, which syncs to every machine, and go
+# out through fleet-alert. A clean run deletes the file, so its presence is the signal.
+set -uo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=fleet-lib.sh
+. "$(dirname "$self")/fleet-lib.sh"
+
+QUIET=0; export FLEET_PROBE=0
+for a in "$@"; do
+  case "$a" in
+    --quiet) QUIET=1 ;;
+    --probe) FLEET_PROBE=1 ;;
+    *) fleet_die "unknown flag: $a" ;;
+  esac
+done
+
+# The daily probe: expensive checks run at most once a day unless forced.
+stamp="$FLEET_STATE/health-last-probe"
+if [ "$FLEET_PROBE" = 0 ]; then
+  last="$(cat "$stamp" 2>/dev/null || echo 0)"
+  [ $(( $(date +%s) - last )) -ge 86400 ] && FLEET_PROBE=1
+fi
+
+ALERT="$FLEET_DROP/FLEET-HEALTH-$FLEET_NAME.txt"
+PROBLEMS=(); HEALED=()
+say() { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
+
+checks=()
+for p in $FLEET_PACKAGES; do
+  [ -x "$FLEET_HOME/packages/$p/check.sh" ] && checks+=("$FLEET_HOME/packages/$p/check.sh")
+done
+for c in "$FLEET_CONFIG_DIR"/checks.d/*; do [ -x "$c" ] && checks+=("$c"); done
+
+for c in ${checks[@]+"${checks[@]}"}; do
+  name="$(basename "$(dirname "$c")")"; [ "$name" = checks.d ] && name="$(basename "$c")"
+  if out="$(fleet_timeout 300 "$c" 2>&1)"; then continue; fi
+  if "$c" --heal >/dev/null 2>&1 && fleet_timeout 300 "$c" >/dev/null 2>&1; then
+    HEALED+=("$name: ${out:-unhealthy}, healed"); fleet_log health "HEALED $name: $out"
+  else
+    PROBLEMS+=("$name: ${out:-unhealthy}"); fleet_log health "PROBLEM $name: $out"
+  fi
+done
+[ "$FLEET_PROBE" = 1 ] && date +%s > "$stamp"
+
+for h in ${HEALED[@]+"${HEALED[@]}"}; do say "  + $h"; done
+if [ "${#PROBLEMS[@]}" -eq 0 ]; then
+  rm -f "$ALERT"
+  [ "${#HEALED[@]}" -eq 0 ] && fleet_log health "OK ${#checks[@]} checks"
+  say "healthy (${#checks[@]} checks$([ "${#HEALED[@]}" -gt 0 ] && echo ", after self-healing"))"
+  exit 0
+fi
+
+mkdir -p "$FLEET_DROP"
+{
+  echo "FLEET HEALTH ALERT: $FLEET_NAME, $(date '+%Y-%m-%d %H:%M:%S')"
+  echo
+  echo "Needs a human:"
+  for p in ${PROBLEMS[@]+"${PROBLEMS[@]}"}; do echo "  - $p"; done
+  if [ "${#HEALED[@]}" -gt 0 ]; then echo; echo "Self-healed this run:"; for h in ${HEALED[@]+"${HEALED[@]}"}; do echo "  + $h"; done; fi
+  echo
+  echo "Log: $FLEET_LOGS/health.log"
+} > "$ALERT"
+say "PROBLEMS:"; for p in ${PROBLEMS[@]+"${PROBLEMS[@]}"}; do say "  - $p"; done
+"$FLEET_HOME/bin/fleet-alert" "health" "$(printf '%s; ' ${PROBLEMS[@]+"${PROBLEMS[@]}"})see ${ALERT##*/}"
+exit 1

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- install.sh replaces __HOME__ and copies this to ~/Library/LaunchAgents/ -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>fleet.resume</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/fleet-workorder</string>
+    <string>resume</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.local/state/fleet/logs/fleet.resume.out</string>
+  <key>StandardErrorPath</key><string>__HOME__/.local/state/fleet/logs/fleet.resume.out</string>
+</dict>
+</plist>

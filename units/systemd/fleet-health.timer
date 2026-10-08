@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the fleet health watchdog every 15 min and soon after boot
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

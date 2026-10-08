@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# fleet-send: push files to another machine right now, over ssh.
+# Default destination is that machine's drop folder (~/drop).
+#
+#   fleet send worker report.md              -> ~/drop/report.md on worker
+#   fleet send laptop shot1.png shot2.png    -> both into the laptop's ~/drop
+#   fleet send worker -d ~/Downloads a.zip   -> ~/Downloads/a.zip on worker
+#
+# <machine> is an ssh alias (see computers.md). Use this when the next step depends on the file
+# being there. Otherwise just drop it in ~/drop and let Syncthing carry it in ~15-25s.
+set -euo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=fleet-lib.sh
+. "$(dirname "$self")/fleet-lib.sh"
+
+usage() { sed -n '2,10p' "$self" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+host="${1:-}"; [ -z "$host" ] || [ "$host" = -h ] && usage 1
+shift
+# scp speaks SFTP and does not shell-expand, so pass paths relative to the remote home.
+# label is for display only, never expanded
+# shellcheck disable=SC2088
+label="~/drop"
+dest="drop"
+while getopts ":d:h" opt; do
+  case "$opt" in
+    d) label="$OPTARG"; dest="${OPTARG#\~/}" ;;
+    h) usage 0 ;;
+    *) usage 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] && usage 1
+for f in "$@"; do [ -e "$f" ] || fleet_die "no such file: $f"; done
+
+if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" true 2>/dev/null; then
+  echo "fleet send: can't reach $host." >&2
+  echo "  check: tailscale status, and that $host is awake with ssh enabled" >&2
+  exit 1
+fi
+ssh -o BatchMode=yes "$host" "mkdir -p \"$dest\""
+scp -q -o BatchMode=yes -r "$@" "$host:$dest/"
+for f in "$@"; do echo "-> $host:$label/$(basename "$f")"; done

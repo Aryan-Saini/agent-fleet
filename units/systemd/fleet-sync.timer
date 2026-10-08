@@ -1,0 +1,12 @@
+[Unit]
+Description=Sync config from the controller every 30 min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+AccuracySec=2min
+# A run missed while the box was down fires on the next boot instead of silently never running.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

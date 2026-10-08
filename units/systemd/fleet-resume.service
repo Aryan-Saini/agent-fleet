@@ -1,0 +1,15 @@
+[Unit]
+Description=Boot continuation: finish, verify and report any open fleet work order
+# Only runs when a work order left durable state behind, so an interrupted run comes back
+# around on the next boot instead of leaving the machine silent.
+ConditionPathExists=%h/.local/state/fleet/workorder/current
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/fleet-workorder resume
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# fleet-workorder: run risky work on a worker so it can never leave the machine down or silent.
+#
+#   fleet workorder start NAME SCRIPT [ARGS]   detach SCRIPT under durable state, then return
+#   fleet workorder status                     what is running, or stuck, and why
+#   fleet workorder clear                      a human read the report and is done with it
+#
+# Called by the system or by a work order script, not by hand:
+#   fleet workorder resume    at boot (fleet-resume unit). No-op without an open order
+#   fleet workorder reboot    from inside SCRIPT: refuse unless boot continuation is armed,
+#                             then mark the order for resume and reboot
+#
+# The script contract. SCRIPT is called as `SCRIPT run ARGS` first, and as `SCRIPT resume ARGS`
+# after a reboot it asked for. $FLEET_WO_STATE is a KEY=VALUE file it may append facts to;
+# they end up in the report. Exit non-zero to abort.
+#
+# Whatever happens, the order ends the same way: run `fleet health --probe`, prove the
+# controller can be reached over ssh, write a report to the drop folder, and alert. The state is
+# cleared only when all of that passes. Otherwise it stays, the next boot re-verifies, and the
+# alert says a human is needed. The worker may lose the task; it may never stay down or silent.
+set -uo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=fleet-lib.sh
+. "$(dirname "$self")/fleet-lib.sh"
+
+WO="$FLEET_STATE/workorder"; STATE="$WO/current"
+export FLEET_WO_STATE="$STATE"
+mkdir -p "$WO/done"
+
+put() { local k="$1"; shift; local tmp="$STATE.tmp"; grep -v "^$k=" "$STATE" > "$tmp" 2>/dev/null; printf '%s=%s\n' "$k" "$*" >> "$tmp"; mv "$tmp" "$STATE"; }
+get() { grep -m1 "^$1=" "$STATE" 2>/dev/null | cut -d= -f2-; }
+log() { fleet_log "workorder-$(get NAME)" "$*"; }
+alert() { "$FLEET_HOME/bin/fleet-alert" "$@"; }
+
+# Boot continuation is what makes a reboot safe. On Linux it is the fleet-resume systemd user
+# unit (needs lingering, so it starts without a login); on macOS the fleet-resume LaunchAgent
+# (needs auto-login on a headless Mac).
+continuation_armed() {
+  case "$FLEET_OS" in
+    linux)  systemctl --user is-enabled --quiet fleet-resume.service 2>/dev/null &&
+            loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes' ;;
+    darwin) [ -f "$HOME/Library/LaunchAgents/fleet.resume.plist" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+verify_and_report() {
+  local outcome="$1"
+  local health health_ok=no rejoin=skipped
+  health="$("$FLEET_HOME/bin/fleet-health" --probe 2>&1)" && health_ok=yes
+  if [ -n "${FLEET_CONTROLLER:-}" ]; then
+    rejoin=no
+    for _ in $(seq 1 40); do   # up to ~10 min for the network and the controller to come back
+      if ssh -o BatchMode=yes -o ConnectTimeout=10 "$FLEET_CONTROLLER" true >/dev/null 2>&1; then rejoin=yes; break; fi
+      sleep 15
+    done
+  fi
+  put HEALTH "$health_ok"; put REJOIN "$rejoin"; put FINISHED "$(date '+%Y-%m-%d %H:%M:%S')"
+
+  local name report
+  name="$(get NAME)"; report="$FLEET_DROP/WORKORDER-$FLEET_NAME-$name.txt"
+  mkdir -p "$FLEET_DROP"
+  {
+    echo "WORK ORDER REPORT: $name on $FLEET_NAME"
+    echo "outcome          : $outcome"
+    echo "health           : $health_ok"
+    echo "controller rejoin: $rejoin"
+    echo "kernel / uptime  : $(uname -r), $(uptime | sed 's/.*up \([^,]*\),.*/\1/')"
+    echo
+    echo "state:"; sed 's/^/  /' "$STATE"
+    echo; echo "fleet health --probe:"; printf '%s\n' "$health" | sed 's/^/  /'
+    echo; echo "last log lines:"; tail -n 25 "$FLEET_LOGS/workorder-$name.log" 2>/dev/null | sed 's/^/  /'
+  } > "$report"
+
+  if [ "$outcome" = ok ] && [ "$health_ok" = yes ] && [ "$rejoin" != no ]; then
+    mv "$STATE" "$WO/done/$name-$(date +%Y%m%d-%H%M%S)"
+    log "complete"
+    alert "work order done" "$name finished, all checks green. Report: ${report##*/}"
+  else
+    put PHASE needs-human
+    log "needs a human: outcome=$outcome health=$health_ok rejoin=$rejoin"
+    alert "work order needs a human" "$name: outcome=$outcome health=$health_ok rejoin=$rejoin. Report: ${report##*/}"
+  fi
+}
+
+run_script() { # run_script run|resume
+  local script args
+  script="$(get SCRIPT)"; args="$(get ARGS)"
+  log "SCRIPT $1 starting"
+  # shellcheck disable=SC2086
+  "$script" "$1" $args >> "$FLEET_LOGS/workorder-$(get NAME).log" 2>&1
+}
+
+case "${1:-status}" in
+  start)
+    name="${2:-}"; script="${3:-}"
+    [ -n "$name" ] && [ -n "$script" ] || fleet_die "usage: fleet workorder start NAME SCRIPT [ARGS]"
+    [ -f "$STATE" ] && fleet_die "an order is already open: $(get NAME) ($(get PHASE)). See: fleet workorder status"
+    script="$(cd "$(dirname "$script")" && pwd)/$(basename "$script")"
+    [ -x "$script" ] || fleet_die "not executable: $script"
+    : > "$STATE"
+    put NAME "$name"; put SCRIPT "$script"; put ARGS "${*:4}"; put PHASE run; put STARTED "$(date '+%Y-%m-%d %H:%M:%S')"
+    if [ "$FLEET_OS" = linux ] && command -v systemd-run >/dev/null; then
+      systemd-run --user --quiet --collect --unit="fleet-workorder-$name" "$self" _run
+    else
+      nohup "$self" _run >/dev/null 2>&1 &
+      disown
+    fi
+    echo "work order '$name' started detached on $FLEET_NAME."
+    echo "It reports to $FLEET_DROP/WORKORDER-$FLEET_NAME-$name.txt and alerts when done. Safe to disconnect."
+    ;;
+  _run)
+    if run_script run; then put PHASE verify; verify_and_report ok
+    else put SCRIPT_EXIT "$?"; put PHASE verify; verify_and_report "script failed"; fi
+    ;;
+  reboot)
+    [ -f "$STATE" ] || fleet_die "no open work order"
+    if ! continuation_armed; then
+      put ABORT "boot continuation not armed, refused to reboot blind"
+      fleet_die "boot continuation is not armed (run install.sh). Refusing to reboot blind"
+    fi
+    put PHASE resume; put REBOOTED "$(date '+%Y-%m-%d %H:%M:%S')"
+    log "rebooting into resume"
+    alert "work order rebooting" "$(get NAME): rebooting $FLEET_NAME, will report after boot"
+    sync
+    if [ "$FLEET_OS" = darwin ]; then sudo -n shutdown -r now; else sudo -n systemctl reboot; fi
+    ;;
+  resume)
+    [ -f "$STATE" ] || exit 0
+    case "$(get PHASE)" in
+      resume) if run_script resume; then verify_and_report ok; else verify_and_report "resume step failed"; fi ;;
+      run)    put INTERRUPTED "$(date '+%Y-%m-%d %H:%M:%S')"; verify_and_report "interrupted (power loss or crash mid-run)" ;;
+      *)      verify_and_report "re-verifying after boot" ;;
+    esac
+    ;;
+  status)
+    if [ -f "$STATE" ]; then cat "$STATE"; else echo "no open work order"; fi
+    ls -1t "$WO/done" 2>/dev/null | head -5 | sed 's/^/done: /'
+    ;;
+  clear)
+    [ -f "$STATE" ] || { echo "no open work order"; exit 0; }
+    mv "$STATE" "$WO/done/$(get NAME)-cleared-$(date +%Y%m%d-%H%M%S)"; echo "cleared"
+    ;;
+  -h|--help|help) sed -n '2,22p' "$self" | sed 's/^# \{0,1\}//' ;;
+  *) fleet_die "unknown action '$1' (try: fleet workorder help)" ;;
+esac

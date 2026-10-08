@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# fleet: entry point. `fleet <cmd> ...` runs `fleet-<cmd>`, git style, so a package can add a
+# command by dropping a `fleet-<name>` script on PATH.
+#
+#   fleet                 who am I, and what is installed here
+#   fleet send ...        push files to another machine's drop folder now
+#   fleet alert ...       tell the human something, from any machine
+#   fleet health          run every enabled package's health check, heal what is safe
+#   fleet sync            worker only: receive config from the controller
+#   fleet link            wire rules and skills into every installed agent harness
+#   fleet workorder ...   run risky work detached, survive reboots, always report back
+set -euo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=fleet-lib.sh
+. "$(dirname "$self")/fleet-lib.sh"
+
+cmd="${1:-}"
+case "$cmd" in
+  ""|whoami)
+    echo "machine   $FLEET_NAME"
+    echo "role      $FLEET_ROLE"
+    echo "os        $FLEET_OS"
+    echo "fleet     $FLEET_HOME"
+    echo "drop      $FLEET_DROP"
+    echo "packages  ${FLEET_PACKAGES:-none}"
+    [ -f "$FLEET_STATE/workorder/current" ] && echo "workorder IN PROGRESS: $(grep -m1 '^NAME=' "$FLEET_STATE/workorder/current" | cut -d= -f2-)"
+    [ "$FLEET_ROLE" = unset ] && echo "(no ~/.config/fleet/machine.env yet: run ./install.sh)"
+    exit 0 ;;
+  -h|--help|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+shift
+sub="fleet-$cmd"
+if [ -x "$FLEET_HOME/bin/$sub" ]; then exec "$FLEET_HOME/bin/$sub" "$@"; fi
+command -v "$sub" >/dev/null 2>&1 && exec "$sub" "$@"
+fleet_die "unknown command '$cmd' (try: fleet help)"

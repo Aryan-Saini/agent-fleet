@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# fleet-alert: get the human's attention from any machine, headless or not.
+#
+#   fleet alert "TITLE" "MESSAGE"
+#
+# Always appends to $FLEET_DROP/FLEET-ALERTS.log first. The drop folder syncs to every machine,
+# so the alert survives even when every notifier below fails or the controller is asleep.
+# Then it tries, best effort, in order:
+#   1. FLEET_NTFY_TOPIC set      push to your phone through ntfy (https://ntfy.sh)
+#   2. a local desktop           macOS notification / notify-send
+#   3. FLEET_CONTROLLER set      a desktop notification on the controller, over ssh
+#
+# Never fails the caller. A job that alerts must not break because alerting broke.
+set -uo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=fleet-lib.sh
+. "$(dirname "$self")/fleet-lib.sh"
+
+title="${1:-alert}"; msg="${2:-}"
+mkdir -p "$FLEET_DROP" 2>/dev/null
+printf '%s [%s] %s: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$FLEET_NAME" "$title" "$msg" >> "$FLEET_DROP/FLEET-ALERTS.log" 2>/dev/null
+
+notify_cmd() { # prints a shell command that shows a desktop notification on the given OS
+  local os="$1" t="$2" m="$3"
+  t="${t//\"/\'}"; m="${m//\"/\'}"
+  case "$os" in
+    darwin) printf "osascript -e 'display notification \"%s\" with title \"%s\"'" "$m" "[$FLEET_NAME] $t" ;;
+    linux)  printf 'notify-send "%s" "%s"' "[$FLEET_NAME] $t" "$m" ;;
+  esac
+}
+
+if [ -n "${FLEET_NTFY_TOPIC:-}" ]; then
+  curl -fsS --max-time 10 -H "Title: [$FLEET_NAME] $title" -d "$msg" \
+    "${FLEET_NTFY_SERVER:-https://ntfy.sh}/$FLEET_NTFY_TOPIC" >/dev/null 2>&1
+fi
+
+if [ "$FLEET_OS" = darwin ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  bash -c "$(notify_cmd "$FLEET_OS" "$title" "$msg")" >/dev/null 2>&1
+fi
+
+if [ "$FLEET_ROLE" != controller ] && [ -n "${FLEET_CONTROLLER:-}" ]; then
+  remote_os="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$FLEET_CONTROLLER" uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  [ -n "$remote_os" ] && ssh -o BatchMode=yes -o ConnectTimeout=5 "$FLEET_CONTROLLER" \
+    "$(notify_cmd "$remote_os" "$title" "$msg")" >/dev/null 2>&1
+fi
+exit 0

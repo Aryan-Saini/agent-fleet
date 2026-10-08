@@ -1,0 +1,65 @@
+#!/bin/sh
+# mcp-server-launch: start a globally-installed MCP server without depending on
+# the caller's PATH.
+#
+#   mcp-server-launch chrome-devtools "$@"
+#   mcp-server-launch playwright "$@"
+#
+# Why this exists. The servers used to be launched as `npx -y <pkg>@latest`, which
+# hits the npm registry on EVERY spawn: ~2.8s warm, and hard CONNECT_TIMEOUT at 30s
+# whenever the network is slow or the machine just woke. They're installed globally
+# now (`npm i -g`, refreshed by `/fleet-update`), so the only job left is starting them.
+#
+# The catch: their bins are `#!/usr/bin/env node` scripts. Claude Code launched from
+# the Dock/Spotlight inherits launchd's PATH, which has no node, so calling the bin
+# directly fails. This resolves node itself and execs it, so the launch method stops
+# mattering.
+set -eu
+
+PREFIX="${MCP_GLOBAL_PREFIX:-$HOME/.npm-global}"
+
+case "${1:-}" in
+  chrome-devtools) ENTRY="$PREFIX/lib/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js" ;;
+  playwright)      ENTRY="$PREFIX/lib/node_modules/@playwright/mcp/cli.js" ;;
+  *) echo "mcp-server-launch: unknown server '${1:-}' (want: chrome-devtools | playwright)" >&2; exit 2 ;;
+esac
+shift
+
+[ -f "$ENTRY" ] || {
+  echo "mcp-server-launch: $ENTRY missing. Install it: npm i -g --prefix $PREFIX chrome-devtools-mcp @playwright/mcp" >&2
+  exit 1
+}
+
+# node, in order of preference: whatever is already on PATH, then nvm's default
+# alias, then the highest nvm version, then the usual system installs. Resolved at
+# run time so an nvm upgrade doesn't strand a hardcoded path.
+find_node() {
+  command -v node 2>/dev/null && return 0
+  if [ -r "$HOME/.nvm/alias/default" ]; then
+    alias_v="$(cat "$HOME/.nvm/alias/default")"
+    for cand in "$HOME/.nvm/versions/node/$alias_v/bin/node" \
+                "$HOME/.nvm/versions/node/v$alias_v/bin/node"; do
+      [ -x "$cand" ] && { echo "$cand"; return 0; }
+    done
+    # alias may be a line like "25" that points at the newest v25.x
+    # nvm version dirs are plain vN.N.N names
+    # shellcheck disable=SC2010
+    newest="$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | grep "^v$alias_v" | sort -V | tail -1)"
+    [ -n "$newest" ] && [ -x "$HOME/.nvm/versions/node/$newest/bin/node" ] && {
+      echo "$HOME/.nvm/versions/node/$newest/bin/node"; return 0; }
+  fi
+  newest="$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -1)"
+  [ -n "$newest" ] && [ -x "$HOME/.nvm/versions/node/$newest/bin/node" ] && {
+    echo "$HOME/.nvm/versions/node/$newest/bin/node"; return 0; }
+  for cand in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    [ -x "$cand" ] && { echo "$cand"; return 0; }
+  done
+  return 1
+}
+
+NODE="$(find_node)" || {
+  echo "mcp-server-launch: no node found (PATH=$PATH)" >&2
+  exit 1
+}
+
+exec "$NODE" "$ENTRY" "$@"

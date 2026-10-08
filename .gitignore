@@ -1,0 +1,17 @@
+# Never commit secrets, even in your private fleet repo.
+.env
+.env.*
+*.pem
+*.key
+*token*.json
+credentials.json
+client_secret*.json
+agent-secrets.env
+machine.env
+!templates/machine.env
+secrets/
+
+# Logs and machine state live in ~/.local/state/fleet, but guard anyway.
+*.log
+logs/
+.DS_Store

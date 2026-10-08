@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- install.sh replaces __HOME__ and copies this to ~/Library/LaunchAgents/ -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>fleet.health</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/fleet-health</string>
+    <string>--quiet</string>
+  </array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.local/state/fleet/logs/fleet.health.out</string>
+  <key>StandardErrorPath</key><string>__HOME__/.local/state/fleet/logs/fleet.health.out</string>
+</dict>
+</plist>

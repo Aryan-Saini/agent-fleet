@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# shot: screenshot a URL in headless Chromium into ~/drop.
+#
+#   shot <url> <name> [--full] [--mobile]   -> ~/drop/<name>.png
+set -euo pipefail
+url="${1:?usage: shot <url> <name> [--full] [--mobile]}"; name="${2:?usage: shot <url> <name>}"; shift 2
+full=false; w=1440; h=900
+for a in "$@"; do case "$a" in --full) full=true ;; --mobile) w=390; h=844 ;; esac; done
+out="${FLEET_DROP:-$HOME/drop}/$name.png"
+NODE_PATH="$HOME/.local/share/fleet-browser/node_modules" node -e '
+const { chromium } = require("playwright-core");
+const [url, out, full, w, h] = process.argv.slice(1);
+(async () => {
+  const b = await chromium.launch();
+  try {
+    const p = await b.newPage({ viewport: { width: +w, height: +h } });
+    await p.goto(url, { waitUntil: "networkidle" });
+    await p.screenshot({ path: out, fullPage: full === "true" });
+  } finally { await b.close(); }
+})().catch(e => { console.error(e.message); process.exit(1); });
+' "$url" "$out" "$full" "$w" "$h"
+echo "$out"

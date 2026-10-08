@@ -1,0 +1,6 @@
+[Unit]
+Description=fleet health watchdog (heal what is safe, report the rest)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/fleet-health --quiet
