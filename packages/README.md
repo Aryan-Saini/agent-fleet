@@ -16,6 +16,8 @@ then re-run `./install.sh` so any `bin/` scripts land on PATH.
 | `README.md` | yes | what it is, why, install per OS, verify, update, gotchas. The spec |
 | `check.sh` | no | health check run by `fleet health`. Exit 0 healthy, exit 1 broken with one line on stdout. `--heal` tries a safe fix, exits 1 when it has none |
 | `bin/` | no | commands linked into `~/.local/bin` |
+| `npm` | no | npm packages this package ships as, one per line. `./install.sh` installs them globally, `fleet link` links each one's `skills/`, `/fleet-update` updates them |
+| `install.sh` | no | setup `./install.sh` runs for this package. Idempotent; prints steps only a human can do (a login) instead of attempting them |
 | `*.sh` | no | reference implementations, such as a work order per OS |
 
 ## Any OS
@@ -30,9 +32,11 @@ next to the original (`check.sh` handling one more `uname -s` case, or `windows.
 
 1. `packages/<name>/README.md` first. Cover install, verify, update, and what breaks.
 2. A `check.sh` if the thing can silently die. Keep it fast; gate slow work on `FLEET_PROBE=1`.
-3. Heal only what is safe and idempotent: restarting a service, re-applying a mapping. Never
+3. If the tool is useful outside the fleet, publish it to npm on its own and list it in an
+   `npm` file, so the package stays a thin spec and the tool versions independently.
+4. Heal only what is safe and idempotent: restarting a service, re-applying a mapping. Never
    heal a login, a reboot or anything that needs a human. Report it instead.
-4. If it needs updating, say how in the README; `/fleet-update` reads it.
+5. If it needs updating, say how in the README; `/fleet-update` reads it.
 
 | package | for | what |
 | --- | --- | --- |
@@ -40,8 +44,10 @@ next to the original (`check.sh` handling one more `uname -s` case, or `windows.
 | [drop-folder](drop-folder/) | every machine | `~/drop` synced everywhere by Syncthing |
 | [always-on](always-on/) | workers | never sleep, come back after power loss, run headless |
 | [agent-clis](agent-clis/) | workers | catch expired Claude, Codex, Cursor, opencode and gh logins |
-| [t3-remote](t3-remote/) | workers, controllers | drive agents from a phone through T3 Code and T3 Connect |
-| [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen |
+| [accounts](accounts/) | every machine | which logins and API keys you need, and how keys reach every machine |
+| [t3-remote](t3-remote/) | workers, controllers | install T3 Code (stable or nightly) and drive agents from a phone |
+| [postdraft](postdraft/) | every machine | agents publish plans, reports and files as links, on your own server (npm) |
+| [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen (npm) |
 | [peekaboo](peekaboo/) | macOS | let an agent see and click the real screen |
 | [mcp](mcp/) | every machine | MCP servers that work on every machine without per-machine logins |
 | [os-update](os-update/) | workers | OS upgrades as reboot-safe work orders |

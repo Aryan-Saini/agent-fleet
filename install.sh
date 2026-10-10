@@ -12,7 +12,8 @@
 # What it does:
 #   1. writes ~/.config/fleet/machine.env if missing (never overwrites; edit it by hand after)
 #   2. creates fleet.env, rules/ and computers.md from templates/ if this checkout has none yet
-#   3. links bin/ and each enabled package's bin/ into ~/.local/bin
+#   3. links bin/ and each enabled package's bin/ into ~/.local/bin, installs the npm packages
+#      they ship as (packages/<name>/npm), and runs each package's own install.sh
 #   4. creates ~/drop and runs `fleet link` (rules + skills into every harness)
 #   5. workers only: installs the health timer, the sync timer and boot continuation
 set -euo pipefail
@@ -26,7 +27,7 @@ while [ $# -gt 0 ]; do
     --name) NAME="$2"; shift 2 ;;
     --controller) CONTROLLER="$2"; shift 2 ;;
     --packages) PACKAGES="$2"; shift 2 ;;
-    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -62,6 +63,24 @@ for f in bin/fleet bin/fleet-* ; do
 done
 for p in $PACKAGES; do
   for f in packages/"$p"/bin/*; do [ -f "$f" ] && ln -sfn "$FLEET_HOME/$f" "$HOME/.local/bin/$(basename "$f")"; done
+done
+# npm-backed packages: installed once here, updated by /fleet-update. Their skills/ folders are
+# linked by fleet link like any other skill.
+npm_pkgs="$(for p in $PACKAGES; do [ -f "packages/$p/npm" ] && grep -vE '^[[:space:]]*(#|$)' "packages/$p/npm"; done; true)"
+if [ -n "$npm_pkgs" ]; then
+  if command -v npm >/dev/null; then
+    for n in $npm_pkgs; do
+      npm ls -g --depth=0 "$n" >/dev/null 2>&1 && continue
+      npm i -g "$n@latest" >/dev/null && echo "installed $n from npm" || echo "WARNING: npm i -g $n failed"
+    done
+  else
+    echo "WARNING: npm not found; install Node 20+ and re-run to get: $(echo $npm_pkgs)"
+  fi
+fi
+# A package's install.sh does whatever setup it needs. Idempotent; it prints any step only a
+# human can do (a login, an app download) instead of trying it.
+for p in $PACKAGES; do
+  [ -x "packages/$p/install.sh" ] && { echo "== $p"; "packages/$p/install.sh" || echo "WARNING: packages/$p/install.sh failed"; }
 done
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "NOTE: add ~/.local/bin to PATH in ~/.zshenv or ~/.profile (zshenv: non-interactive ssh reads it too)";; esac
 

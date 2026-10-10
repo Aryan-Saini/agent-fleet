@@ -9,14 +9,24 @@ your phone, put the phone away, get a push when the agent is done.
 
 ## Install
 
-| machine | how T3 runs |
-| --- | --- |
-| Linux worker | the `t3` CLI, run as a systemd user service (see `t3 service --help`) |
-| macOS | the desktop app, which runs its own backend |
-| phone | the T3 Code app (TestFlight on iOS) |
+Pick a channel per machine: **stable** (`t3@latest`, the `t3-code` cask) or **nightly** (new
+every day, fixes land first, occasionally breaks). `./install.sh` runs this package's
+`install.sh`, which installs T3 Code on that channel and records `T3_CHANNEL` in `machine.env`:
 
-Then link each backend to your T3 Connect account (`t3 connect link`), enable exposure, and turn
-on mobile push so finished agents notify the phone.
+```bash
+T3_CHANNEL=nightly ./install.sh --role worker ...    # default: stable
+```
+
+| machine | how T3 runs | what install.sh does |
+| --- | --- | --- |
+| Linux worker | the `t3` CLI as a systemd user service | `npm i -g t3@latest` or `t3@nightly`, then `t3 service install` |
+| macOS | the desktop app, which runs its own backend | `brew install --cask t3-code` or `t3-code@nightly` |
+| phone | the T3 Code app (TestFlight on iOS) | nothing; install it yourself |
+
+Then the part only you can do, on each machine: sign in to T3 Connect. On Linux run
+`t3 connect link --headless`, open the link it prints, then `t3 service restart` and
+`t3 connect publish` so finished agents push to your phone. On macOS, sign in from the app's
+Settings and turn on T3 Connect.
 
 Optional second path: `tailscale serve --bg --https=443 http://127.0.0.1:3773` puts the backend
 on `https://<machine>.<tailnet>.ts.net` for anything already on the tailnet. The relay is what
@@ -27,6 +37,7 @@ matters away from home; Tailscale Serve is the fallback.
 In `fleet.env` or `machine.env`:
 
 ```bash
+T3_CHANNEL=stable          # stable | nightly, written by install.sh
 T3_PORT=3773               # the backend's port
 T3_SERVICE=t3code.service  # the systemd user unit name on Linux workers
 ```
@@ -40,8 +51,8 @@ the port answers, because the app owns the connection and the CLI reports it as 
 
 ## Updating
 
-Pick a channel (stable or nightly) per machine and write it down in the machine's README. Keep
-every machine and the phone app compatible; the phone usually sets the floor. Update workers
+Linux: `t3 update --channel "$T3_CHANNEL" --yes`, which also restarts the service. macOS: the app
+updates itself. Keep every machine and the phone app compatible; the phone usually sets the floor. Update workers
 from the controller (`/fleet-update`), not from a timer on the worker, so an update never lands
 while you are driving that worker from your phone.
 
