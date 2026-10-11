@@ -53,7 +53,9 @@ Your fleet is not the author's fleet. Everything this skill updates comes from t
    not reboot-class: go straight on.
 2. **Update.** One lane per machine, started together. Within a lane, package manager first,
    then agent CLIs (`claude update`, `npm i -g @openai/codex`, `cursor-agent update`, `opencode
-   upgrade`), then each enabled package's update steps, then agent-facing services last so their
+   upgrade`), then the npm packages enabled packages ship as (`npm i -g <name>@latest` for each
+   line of `packages/<p>/npm`, then `fleet link` in case their skills changed), then each enabled
+   package's update steps, then agent-facing services last so their
    restart picks up the new CLIs. Log each step to `~/.local/state/fleet/logs/update-<date>/`.
 3. **Probe.** `ssh <m> fleet health --probe` on every machine. A failed login probe is a
    report item, not something to fix with credentials.

@@ -54,3 +54,13 @@ fleet_timeout() {
   elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
   else shift; "$@"; fi
 }
+
+# fleet_npm_packages prints the npm packages the enabled fleet packages ship as, one per line.
+# A fleet package opts in with a packages/<name>/npm file listing npm names, one per line.
+fleet_npm_packages() {
+  local p
+  for p in $FLEET_PACKAGES; do
+    [ -f "$FLEET_HOME/packages/$p/npm" ] && grep -vE '^[[:space:]]*(#|$)' "$FLEET_HOME/packages/$p/npm"
+  done
+  return 0
+}

@@ -120,7 +120,7 @@ change to Codex and has Claude review the patch.
 | path | what |
 | --- | --- |
 | [`quicksetupprompt.md`](quicksetupprompt.md) | the prompt that builds your fleet |
-| [`bin/`](bin/) | `fleet`, `fleet send`, `fleet alert`, `fleet health`, `fleet sync`, `fleet link`, `fleet workorder`. Portable bash |
+| [`bin/`](bin/) | `fleet`, `fleet send`, `fleet alert`, `fleet health`, `fleet sync`, `fleet link`, `fleet workorder`, `fleet secrets`. Portable bash |
 | [`packages/`](packages/) | opt-in capabilities, each a spec plus reference scripts and a health check |
 | [`skills/`](skills/), [`skills-controller/`](skills-controller/), [`skills-worker/`](skills-worker/) | agent skills, linked by role |
 | [`templates/`](templates/) | your `computers.md`, rules, machine READMEs, automations registry, incident format |
@@ -135,9 +135,11 @@ change to Codex and has Claude review the patch.
 | [tailscale](packages/tailscale/) | private network and ssh from anywhere |
 | [drop-folder](packages/drop-folder/) | `~/drop` synced everywhere |
 | [always-on](packages/always-on/) | never sleep, survive power loss, run headless |
+| [accounts](packages/accounts/) | every login and API key you need, and `fleet secrets push` for keys |
 | [agent-clis](packages/agent-clis/) | catch expired agent logins before an agent fails |
-| [t3-remote](packages/t3-remote/) | drive agents from your phone |
-| [screenshare](packages/screenshare/) | see and click a browser on a headless box |
+| [t3-remote](packages/t3-remote/) | install T3 Code, stable or nightly, and drive agents from your phone |
+| [postdraft](packages/postdraft/) | agents publish plans and files as links on your own server ([npm](https://www.npmjs.com/package/postdraft)) |
+| [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)) |
 | [peekaboo](packages/peekaboo/) | let an agent drive a Mac's screen |
 | [mcp](packages/mcp/) | MCP servers on every machine without per-machine logins |
 | [os-update](packages/os-update/) | OS upgrades as reboot-safe work orders |
@@ -157,7 +159,8 @@ change to Codex and has Claude review the patch.
 | fleet-update | controller | agent-built | update every machine from its enabled packages, safely |
 | fleet-add-device | controller | agent-built | onboard a machine, verified by running |
 | control-computer | controller, Claude, macOS | hand-crafted | cheapest-first routing for GUI work, Codex Computer Use and Peekaboo |
-| screenshare-tunnel | controller | agent-built | get a human onto a worker's browser |
+| screenshare-tunnel | with `screenshare` | hand-crafted | get a human onto a worker's browser. Ships in the npm package |
+| html-communication, file-upload, send-file-link, request-upload-link | with `postdraft` | hand-crafted | publish docs, screenshots and files as links. Ship in the npm package |
 | headless-browser, capture | worker, Linux | hand-crafted | a real browser and screenshots with no display |
 
 ## Any OS
@@ -172,7 +175,9 @@ Windows, and the setup prompt tells your agent to port anything your machines ne
 - Your fleet repo is **private**. It holds hostnames and your rules.
 - Secrets never enter it. They live in `~/.config/fleet/machine.env` and
   `~/.config/agent-secrets.env` on each machine, mode 600.
-- Credentials are per machine. Agent CLI logins are done by hand on each box and never sync.
+- Logins are per machine: agent CLIs, `gh` and T3 are logged in by hand on each box and never
+  copied. Static API keys are edited on the controller and sent to workers over ssh with
+  `fleet secrets push`. See [`packages/accounts`](packages/accounts/).
 - Nothing listens on a public port. Tailscale carries everything; `screenshare` firewalls its
   port to the tailnet; a random password per worker never leaves your machines.
 
