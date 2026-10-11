@@ -11,6 +11,9 @@ screenshare https://site/login    # same, and open that URL on the worker
 screenshare shot                  # PNG of the remote screen, no human needed
 ```
 
+With [worker-chrome](../worker-chrome/) on the worker, the viewer shows that Chrome, so a login
+you finish there is the one your agents use.
+
 The tool is its own npm package, [`screenshare-tunnel`](https://github.com/Aryan-Saini/screenshare-tunnel).
 Its README is the full spec: how the Xvfb, Chrome and RustDesk chain works, the firewall rule
 that keeps it on the tailnet, and the gotchas.

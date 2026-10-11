@@ -31,7 +31,10 @@ seconds per start, and a hard timeout whenever the network is slow or the machin
 The shim also finds `node` itself, because a harness launched from a dock or app menu has no node
 on its PATH.
 
-On a headless worker add `--headless` (and `--browser chromium` for playwright).
+On a headless worker add `--headless` (and `--browser chromium` for playwright). When
+[worker-chrome](../worker-chrome/) runs on a worker, the shim ignores those flags and attaches
+both servers to it instead, so agents use the real, logged-in Chrome. `WORKER_CHROME=off` opts
+out.
 
 ## Keys reach every way an agent can start
 

@@ -140,6 +140,7 @@ change to Codex and has Claude review the patch.
 | [t3-remote](packages/t3-remote/) | install T3 Code, stable or nightly, and drive agents from your phone |
 | [postdraft](packages/postdraft/) | agents publish plans and files as links on your own server ([npm](https://www.npmjs.com/package/postdraft)) |
 | [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)) |
+| [worker-chrome](packages/worker-chrome/) | one real, logged-in Chrome on each worker that agents drive ([npm](https://www.npmjs.com/package/worker-chrome)) |
 | [peekaboo](packages/peekaboo/) | let an agent drive a Mac's screen |
 | [mcp](packages/mcp/) | MCP servers on every machine without per-machine logins |
 | [os-update](packages/os-update/) | OS upgrades as reboot-safe work orders |
@@ -161,7 +162,8 @@ change to Codex and has Claude review the patch.
 | control-computer | controller, Claude, macOS | hand-crafted | cheapest-first routing for GUI work, Codex Computer Use and Peekaboo |
 | screenshare-tunnel | with `screenshare` | hand-crafted | get a human onto a worker's browser. Ships in the npm package |
 | html-communication, file-upload, send-file-link, request-upload-link | with `postdraft` | hand-crafted | publish docs, screenshots and files as links. Ship in the npm package |
-| headless-browser, capture | worker, Linux | hand-crafted | a real browser and screenshots with no display |
+| worker-chrome | with `worker-chrome` | hand-crafted | drive the worker's always-on, logged-in Chrome. Ships in the npm package |
+| capture | worker, Linux | hand-crafted | screenshots and video with no display |
 
 ## Any OS
 
