@@ -48,6 +48,7 @@ next to the original (`check.sh` handling one more `uname -s` case, or `windows.
 | [t3-remote](t3-remote/) | workers, controllers | install T3 Code (stable or nightly) and drive agents from a phone |
 | [postdraft](postdraft/) | every machine | agents publish plans, reports and files as links, on your own server (npm) |
 | [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen (npm) |
+| [worker-chrome](worker-chrome/) | workers | one real, logged-in Chrome that agents drive instead of headless Chromium (npm) |
 | [peekaboo](peekaboo/) | macOS | let an agent see and click the real screen |
 | [mcp](mcp/) | every machine | MCP servers that work on every machine without per-machine logins |
 | [os-update](os-update/) | workers | OS upgrades as reboot-safe work orders |

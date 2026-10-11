@@ -4,7 +4,7 @@ description: Capture screenshots or record browser video on a headless worker, d
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [linux]
-  requires: "the drop folder, playwright-core from the headless-browser skill, ffmpeg for video conversion, gh when attaching to a PR"
+  requires: "the drop folder, playwright-core and its Chromium in ~/.local/share/fleet-browser (install below), ffmpeg for video conversion, gh when attaching to a PR"
 ---
 
 # capture
@@ -12,6 +12,17 @@ metadata:
 Produce visual evidence on a machine with no screen. Write it to `~/drop` and Syncthing carries
 it to the controller, which is how the user sees it. Nothing needs uploading for them to look.
 Upload only when a link has to reach someone else or go in a PR.
+
+Captures run in a clean, logged-out headless Chromium on purpose: a screenshot of your own dev
+server should not depend on anyone's cookies. To use a site logged in, or to check behaviour
+rather than film it, use **worker-chrome**.
+
+Install once per worker:
+
+```bash
+npm i --prefix ~/.local/share/fleet-browser playwright-core
+node ~/.local/share/fleet-browser/node_modules/playwright-core/cli.js install --with-deps chromium
+```
 
 ## 1. Screenshot
 

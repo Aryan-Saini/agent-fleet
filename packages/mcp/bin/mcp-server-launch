@@ -18,7 +18,8 @@ set -eu
 
 PREFIX="${MCP_GLOBAL_PREFIX:-$HOME/.npm-global}"
 
-case "${1:-}" in
+SERVER="${1:-}"
+case "$SERVER" in
   chrome-devtools) ENTRY="$PREFIX/lib/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js" ;;
   playwright)      ENTRY="$PREFIX/lib/node_modules/@playwright/mcp/cli.js" ;;
   *) echo "mcp-server-launch: unknown server '${1:-}' (want: chrome-devtools | playwright)" >&2; exit 2 ;;
@@ -56,6 +57,16 @@ find_node() {
   done
   return 1
 }
+
+# On a worker running worker-chrome (packages/worker-chrome), both servers attach to that real,
+# logged-in Chrome instead of launching their own headless one, whatever flags the harness
+# config passes. WORKER_CHROME=off opts out. Nothing listens on 9230 on a controller.
+if [ "${WORKER_CHROME:-on}" != off ] && curl -sfm1 "http://127.0.0.1:${WORKER_CHROME_PORT:-9230}/json/version" >/dev/null 2>&1; then
+  case "$SERVER" in
+    chrome-devtools) set -- --browser-url="http://127.0.0.1:${WORKER_CHROME_PORT:-9230}" ;;
+    playwright)      set -- --cdp-endpoint "http://127.0.0.1:${WORKER_CHROME_PORT:-9230}" ;;
+  esac
+fi
 
 NODE="$(find_node)" || {
   echo "mcp-server-launch: no node found (PATH=$PATH)" >&2
