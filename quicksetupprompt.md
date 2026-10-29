@@ -88,7 +88,9 @@ of the accounts I picked, then wait for my yes. Recommend `accounts` on every ma
 6. Write `rules/AGENTS.md` from the template and the "about me" answers. Keep it
    harness-neutral. Put Claude-only guidance in `rules/CLAUDE.md` below the import. Remove every
    `<placeholder>`. Show me both files before committing.
-7. Copy `skills/subagents` to `skills-local/subagents` and fill its model table from my answers.
+7. Explain to me how skills reach every harness and machine, following `docs/skills.md`: what a
+   symlink is, why we link instead of copy, and that I edit skills only here. Then copy
+   `skills/subagents` to `skills-local/subagents` and fill its model table from my answers.
    A skill in `skills-local/` overrides the kit's skill of the same name, and kit upgrades never
    touch `skills-local/`. Do the same for any other kit skill you personalize.
 8. Commit with conventional commits (`feat: initial fleet`) and push.

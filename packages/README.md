@@ -50,5 +50,6 @@ next to the original (`check.sh` handling one more `uname -s` case, or `windows.
 | [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen (npm) |
 | [worker-chrome](worker-chrome/) | workers | one real, logged-in Chrome that agents drive instead of headless Chromium (npm) |
 | [peekaboo](peekaboo/) | macOS | let an agent see and click the real screen |
+| [vorssaint](vorssaint/) | macOS controllers | free menu bar toolkit, from the release or your own fork's build |
 | [mcp](mcp/) | every machine | MCP servers that work on every machine without per-machine logins |
 | [os-update](os-update/) | workers | OS upgrades as reboot-safe work orders |
