@@ -69,7 +69,8 @@ Config flows **one way**. I author on the controller, commit and push. Every 30 
 worker `reset --hard`s onto it. An edit made on a worker is saved to a ref and discarded, so the
 fleet's brain can never fork. Skill placement decides scope: `skills/` everywhere,
 `skills-controller/` and `skills-worker/` by role, frontmatter by harness and OS, `skills-local/`
-for your own. Details: [`docs/harnesses.md`](docs/harnesses.md).
+for your own. New to symlinks, or want the full walkthrough of keeping skills in sync across many
+workers: [`docs/skills.md`](docs/skills.md). Harness wiring: [`docs/harnesses.md`](docs/harnesses.md).
 
 ## Delegation and safety
 
@@ -125,7 +126,7 @@ change to Codex and has Claude review the patch.
 | [`skills/`](skills/), [`skills-controller/`](skills-controller/), [`skills-worker/`](skills-worker/) | agent skills, linked by role |
 | [`templates/`](templates/) | your `computers.md`, rules, machine READMEs, automations registry, incident format |
 | [`units/`](units/) | systemd and launchd units for the worker loop |
-| [`docs/`](docs/) | cross-machine cookbook, harness wiring, porting to other OSes |
+| [`docs/`](docs/) | skills and symlinks, cross-machine cookbook, harness wiring, porting to other OSes |
 | [`examples/author/`](examples/author/) | my own fleet, anonymized, as a reference |
 
 ### Packages
@@ -139,9 +140,10 @@ change to Codex and has Claude review the patch.
 | [agent-clis](packages/agent-clis/) | catch expired agent logins before an agent fails |
 | [t3-remote](packages/t3-remote/) | install T3 Code, stable or nightly, and drive agents from your phone |
 | [postdraft](packages/postdraft/) | agents publish plans and files as links on your own server ([npm](https://www.npmjs.com/package/postdraft)) |
-| [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)) |
+| [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)), and your Mac from your phone with Sill |
 | [worker-chrome](packages/worker-chrome/) | one real, logged-in Chrome on each worker that agents drive ([npm](https://www.npmjs.com/package/worker-chrome)) |
 | [peekaboo](packages/peekaboo/) | let an agent drive a Mac's screen |
+| [vorssaint](packages/vorssaint/) | the free menu bar toolkit I run all day, from the release or your own fork |
 | [mcp](packages/mcp/) | MCP servers on every machine without per-machine logins |
 | [os-update](packages/os-update/) | OS upgrades as reboot-safe work orders |
 
@@ -153,7 +155,7 @@ change to Codex and has Claude review the patch.
 | worker | everywhere | agent-built | operate a worker: connect, tmux, files, services, agents across machines |
 | automation | everywhere | agent-built | add a scheduled job the native way, versioned and verified |
 | edit-md-files | everywhere | agent-built | where a new rule or skill belongs, and how it ships |
-| subagents | everywhere, Claude | agent-built | model routing, other harnesses, the review council |
+| subagents | everywhere, Claude, Codex, opencode | agent-built | model routing, other harnesses, the review council |
 | codex-implementation | everywhere, Claude | hand-crafted | delegate a scoped change to Codex, review the diff |
 | file-pr | everywhere | hand-crafted | PRs with a plain-language problem statement first |
 | unslop, technical-writing | everywhere | hand-crafted | writing rules that cut AI tells |
