@@ -47,7 +47,7 @@ next to the original (`check.sh` handling one more `uname -s` case, or `windows.
 | [accounts](accounts/) | every machine | which logins and API keys you need, and how keys reach every machine |
 | [t3-remote](t3-remote/) | workers, controllers | install T3 Code (stable or nightly) and drive agents from a phone |
 | [postdraft](postdraft/) | every machine | agents publish plans, reports and files as links, on your own server (npm) |
-| [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen (npm) |
+| [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen (npm), and a Mac from your phone (Sill) |
 | [worker-chrome](worker-chrome/) | workers | one real, logged-in Chrome that agents drive instead of headless Chromium (npm) |
 | [peekaboo](peekaboo/) | macOS | let an agent see and click the real screen |
 | [vorssaint](vorssaint/) | macOS controllers | free menu bar toolkit, from the release or your own fork's build |

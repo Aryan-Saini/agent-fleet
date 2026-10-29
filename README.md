@@ -140,7 +140,7 @@ change to Codex and has Claude review the patch.
 | [agent-clis](packages/agent-clis/) | catch expired agent logins before an agent fails |
 | [t3-remote](packages/t3-remote/) | install T3 Code, stable or nightly, and drive agents from your phone |
 | [postdraft](packages/postdraft/) | agents publish plans and files as links on your own server ([npm](https://www.npmjs.com/package/postdraft)) |
-| [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)) |
+| [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)), and your Mac from your phone with Sill |
 | [worker-chrome](packages/worker-chrome/) | one real, logged-in Chrome on each worker that agents drive ([npm](https://www.npmjs.com/package/worker-chrome)) |
 | [peekaboo](packages/peekaboo/) | let an agent drive a Mac's screen |
 | [vorssaint](packages/vorssaint/) | the free menu bar toolkit I run all day, from the release or your own fork |
