@@ -23,8 +23,8 @@ proven. **Invariant: the worker may lose the current task; it may never stay dow
 
 | machine | role | OS | always on | notes |
 | --- | --- | --- | --- | --- |
-| laptop | controller | macOS | no; woken at 01:58 for the nightly update | T3 Code desktop app (nightly), Cua Driver, Halo app, Sill. sudo by Keychain askpass |
-| worker | worker | Arch Linux, stock kernel, server only (about 700 packages after removing the desktop and games) | yes: sleep targets masked, hardware watchdog, `kernel.panic=10` | AMD GPU, 32 GB RAM, 16 threads. CPU boost off and T3 agents capped by systemd slices after hard freezes under load. Passwordless sudo |
+| laptop | controller | macOS | no; woken at 01:58 for the nightly update | T3 Code desktop app (nightly), Cua Driver, Halo app, Sill |
+| worker | worker | Arch Linux, stock kernel, server only (about 700 packages after removing the desktop and games) | yes: sleep targets masked, hardware watchdog, `kernel.panic=10` | AMD GPU, 32 GB RAM, 16 threads. CPU boost off and T3 agents capped by systemd slices after hard freezes under load |
 | phone-1 | remote | iOS | n/a | T3 Code via TestFlight, push notifications on |
 | phone-2 | remote | iOS | n/a | same |
 

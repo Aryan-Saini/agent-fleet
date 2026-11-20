@@ -24,7 +24,7 @@ You build three small things once. They are worth it: every dev server after tha
 
 | piece | what it does |
 | --- | --- |
-| `devserver@.service` | systemd user template unit. `ExecStart=devserver %i`, `Restart=always`, `NoNewPrivileges=yes` (dev servers run arbitrary npm code; if the box has passwordless sudo this blocks it) |
+| `devserver@.service` | systemd user template unit. `ExecStart=devserver %i`, `Restart=always`, `NoNewPrivileges=yes` (blocks direct sudo from npm code; not isolation, use a separate account for untrusted code) |
 | `devserver <name>` | sources `~/.config/devservers/<name>.conf` (`DIR`, `PORT`, `CMD`, `KEEP`; mode 600), exports `PORT` and `HOST=127.0.0.1`, `cd "$DIR"`, `exec sh -c "$CMD"`. Set PATH explicitly: units get no profile |
 | `worker-expose` | the only interface: `add [--keep] <name> <dir> <port> ['<cmd>']`, `rm <name>`, `ls`, `reap` |
 

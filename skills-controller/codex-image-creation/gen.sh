@@ -75,9 +75,13 @@ esac
 CFG="$HOME/.codex/config.toml"
 section() { [ -f "$CFG" ] || return 0; sed -n '/^\[model_providers\.cliproxy\]/,/^\[/p' "$CFG"; }
 HUB="$(section | sed -n 's/^base_url *= *"\(.*\)"/\1/p' | head -1)"
-TOKEN="$(section | sed -n 's/^experimental_bearer_token *= *"\(.*\)"/\1/p' | head -1)"
+# The token is whatever the provider block uses: env_key names an environment variable (the setup
+# in packages/cliproxy), experimental_bearer_token holds it inline.
+ENV_KEY="$(section | sed -n 's/^env_key *= *"\(.*\)"/\1/p' | head -1)"
+TOKEN="${ENV_KEY:+${!ENV_KEY:-}}"
+[ -n "$TOKEN" ] || TOKEN="$(section | sed -n 's/^experimental_bearer_token *= *"\(.*\)"/\1/p' | head -1)"
 if [ -z "$HUB" ] || [ -z "$TOKEN" ]; then
-  [ -n "${OPENAI_API_KEY:-}" ] || { echo "no cliproxy base_url/token in $CFG and no OPENAI_API_KEY" >&2; exit 1; }
+  [ -n "${OPENAI_API_KEY:-}" ] || { echo "no cliproxy base_url and token in $CFG (is ${ENV_KEY:-its env_key} exported?) and no OPENAI_API_KEY" >&2; exit 1; }
   HUB="https://api.openai.com/v1"; TOKEN="$OPENAI_API_KEY"
 fi
 

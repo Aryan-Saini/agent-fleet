@@ -39,7 +39,10 @@ What `add` enforces:
   Next: `pnpm dev -H localhost` (not `127.0.0.1`, which breaks Next's internal rewrites behind
   the proxy). Vite: `--host localhost`.
 - **No root.** It refuses to run as root, and the unit sets `NoNewPrivileges=yes`, so a dev
-  dependency can't use passwordless `sudo`.
+  dependency can't call `sudo` directly. That is a speed bump, not isolation: code running as your
+  user can still start another unit through your systemd manager or edit files your automations
+  run. If the worker has passwordless sudo and runs untrusted code, run dev servers as a separate
+  account with no sudo (see [docs/architecture.md](../../docs/architecture.md#sudo-across-machines)).
 - **No clobbering.** Ports are 1 to 55535, so HTTPS ports are 10001 and up and never hit `443`
   (where T3 Code lives, see [t3-remote](../t3-remote/)). It refuses a port another server uses, a
   port something else listens on, or an HTTPS port mapped to something else. `rm` only drops a

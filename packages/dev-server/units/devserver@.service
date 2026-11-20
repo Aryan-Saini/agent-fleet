@@ -10,8 +10,9 @@ ExecStart=%h/.local/bin/devserver %i
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
-# Dev servers run arbitrary npm code. If sudo is passwordless on the worker, this is what stops
-# a dependency from using it.
+# Dev servers run arbitrary npm code. This stops it calling sudo or setuid binaries directly. It
+# does not stop it asking the user's systemd manager for another unit, so it is not isolation:
+# for untrusted code, run the unit as a separate account with no sudo.
 NoNewPrivileges=yes
 
 [Install]

@@ -25,19 +25,23 @@ snap=$(git commit-tree "$(GIT_INDEX_FILE=$idx git write-tree)" -p HEAD -m "hando
 # Push the branch (no force: a diverged branch on the target stops here) and the snapshot.
 git push "$host:$root" "HEAD:refs/heads/$branch" "$snap:refs/handoff/$branch"
 
-wt="\$HOME/.t3/worktrees/$(basename "$root")/${branch//\//-}"
-ssh "$host" bash -s <<REMOTE
+# Values reach the remote as %q-escaped arguments and the script itself is a quoted heredoc, so a
+# branch name or path holding quotes or $(...) is data on the target, never code.
+q() { printf '%q' "$1"; }
+ssh "$host" "bash -s -- $(q "$root") $(q "$branch") $(q "$setup") $(q "$host")" <<'REMOTE'
 set -euo pipefail
+root=$1 branch=$2 setup=$3 host=$4
+case $setup in '$HOME'/*) setup="$HOME/${setup#\$HOME/}" ;; esac   # default is relative to the target's home
 cd "$root"
-wt="$wt"
-git worktree add "\$wt" "$branch"
-cd "\$wt"
+wt="$HOME/.t3/worktrees/$(basename "$root")/${branch//\//-}"
+git worktree add "$wt" "$branch"
+cd "$wt"
 git diff --binary HEAD "refs/handoff/$branch" | git apply --allow-empty
 git update-ref -d "refs/handoff/$branch"
 if [ -x "$setup" ]; then
-  T3CODE_PROJECT_ROOT="$root" T3CODE_WORKTREE_PATH="\$wt" "$setup" >/tmp/t3-handoff-setup.log 2>&1 \
+  T3CODE_PROJECT_ROOT="$root" T3CODE_WORKTREE_PATH="$wt" "$setup" >/tmp/t3-handoff-setup.log 2>&1 \
     || echo "move-worktree: setup failed, see /tmp/t3-handoff-setup.log on $host" >&2
 fi
 git status --short | head -20
-echo "\$wt"
+echo "$wt"
 REMOTE

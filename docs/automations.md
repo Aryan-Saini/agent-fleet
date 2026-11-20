@@ -14,7 +14,7 @@ adds a job the native way.
 | triggers | two LaunchAgents: hourly at :30, and every minute | one `.timer` per job |
 | schedule | a `cadence` file per tool: `every <N>m`, `hourly`, or none for daily (first fire after 23:30) | any `OnCalendar=` or `OnUnitActiveSec=` |
 | a new job | drop a folder in `tools/` | write a `.service` and `.timer`, `enable --now` |
-| permissions | every tool inherits the runner's Full Disk Access | none to inherit; `sudo` is passwordless |
+| permissions | every tool inherits the runner's Full Disk Access | none to inherit; root via whatever sudo option you chose ([architecture.md](architecture.md#sudo-across-machines)) |
 | missed runs | daily tools run on the first fire after wake | `Persistent=true` catches up after downtime |
 | logs | `tools/<name>/logs/<name>.log`, gitignored | `journalctl --user -u <name>` |
 | reference | [`packages/mac-automations`](../packages/mac-automations/) | [`packages/linux-automations`](../packages/linux-automations/) |

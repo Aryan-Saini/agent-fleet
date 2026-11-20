@@ -35,8 +35,13 @@ controller's `bypassPermissions` or a path under the controller's home.
 
 Codex is captured but never regenerated. Its `config.toml` holds the trusted project list and MCP
 wiring, and stdlib Python can't write TOML. Snapshots give you diff and restore, and `check`
-reports when `model` or `model_reasoning_effort` differ between machines. Credential-looking
-values are redacted in the snapshot.
+reports when `model`, `model_reasoning_effort` or `service_tier` differ between machines.
+
+Secrets never reach the repo. In Codex snapshots, any key whose name looks like a credential
+(basic or literal string) and any `Bearer`/`Basic` value, inline headers included, become
+`<redacted>`. In Claude settings, secret-looking `env` values are redacted on capture and filled
+back in from the live file on `apply`; a redacted key with no live value is dropped. Review a
+capture's diff before committing anyway: the redactor matches names, not meaning.
 
 ```bash
 settings-sync capture   # controller: live -> settings/ (then commit and push)

@@ -65,9 +65,16 @@ for run in "$STAGING"/*/; do
   if [ -f "$run/PACKED" ]; then
     note "retrying upload from $(basename "$run")"; upload_run "$run"
   else
+    # No PACKED marker: the originals were never deleted (PACKED is written first), so put them
+    # back and drop the partial archive. Anything that can't move back (a name collision) keeps
+    # the run dir, and the job stops for a human instead of deleting it.
     note "recovering unpacked files from $(basename "$run")"
     find "$run/files" -maxdepth 1 -type f -exec mv -n -t "$LOGS" {} + 2>/dev/null || true
     find "$run/files/orphaned-parts" -mindepth 1 -maxdepth 1 -type d -exec mv -n -t "$LOGS" {} + 2>/dev/null || true
+    if [ -n "$(find "$run/files" -mindepth 1 -not -type d -print -quit 2>/dev/null)" ] ||
+       [ -n "$(find "$run/files/orphaned-parts" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+      die "$run still holds files that could not move back to $LOGS; resolve by hand"
+    fi
     rm -rf "$run"
   fi
 done
@@ -103,8 +110,11 @@ tar -C "$RUN/files" -cf - -T "$LIST" | zstd -q -19 --long=30 -T4 -o "$ARCHIVE" |
 # 4. Verify before deleting anything: the stream decodes and holds every file.
 packed=$(zstd -dc --long=30 "$ARCHIVE" | tar -tf - | wc -l) || die "$ARCHIVE does not decode"
 [ "$packed" -eq "$count" ] || die "$ARCHIVE holds $packed files, expected $count"
-rm -rf "$RUN/files" "$LIST"
+# Mark the run packed before deleting anything, so an interruption here leaves either the
+# originals (no marker) or a verified archive (marker), never neither.
+sync "$ARCHIVE" 2>/dev/null || sync
 touch "$RUN/PACKED"
+rm -rf "$RUN/files" "$LIST"
 size=$(stat -c %s "$ARCHIVE")
 note "packed $count requests, $(numfmt --to=iec "$raw") -> $(numfmt --to=iec "$size")"
 

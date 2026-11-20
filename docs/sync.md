@@ -90,17 +90,18 @@ Each harness's settings split three ways:
 | --- | --- | --- |
 | shared | model, effort, hooks, behavior flags | `settings/<harness>/shared.json` |
 | per machine | permissions, plugin sets, absolute paths | `settings/<harness>/<machine>.json` |
-| ignored | tokens, caches, window geometry | nowhere |
+| ignored or redacted | tokens, keys, caches, window geometry | nowhere; secret-looking values become `<redacted>` |
 
 `apply` merges shared over the machine's own file into the live settings, after a backup. That
 per-machine overlay is what stops a one-way sync from handing the worker the controller's
 `bypassPermissions` and its macOS-only statusline path. Per-machine files are edited on the
 controller like any other tracked file.
 
-- **Claude**: shared plus overlay merged into `settings.json`. `skillOverrides` is derived on
-  every apply from each skill's `scope:` and `platform:`, so the controller does not load
-  worker-only or Linux-only skills and the worker does not load controller-only or macOS-only
-  ones.
+- **Claude**: shared plus overlay merged into `settings.json`. Secret-looking `env` values are
+  redacted on capture and restored from the live file on apply, so they never reach the repo.
+  Which skills a machine loads is not a setting: `fleet link` decides it, linking a skill only
+  where its folder (`skills-controller/`, `skills-worker/`) and its `platform:` and `harness:`
+  metadata allow ([skills.md](skills.md)).
 - **Codex**: captured for diff and restore, and a few keys (`model`, `model_reasoning_effort`,
   `service_tier`) are checked for drift, but `config.toml` is never regenerated. It carries the
   trusted project list and MCP wiring, and a bad rewrite breaks every Codex session.
