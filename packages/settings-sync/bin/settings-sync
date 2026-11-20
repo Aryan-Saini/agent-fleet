@@ -58,16 +58,39 @@ CLAUDE_SHARED = {
 
 # Codex keys that must agree across machines. Checked, never rewritten: config.toml also holds
 # the trusted project list and MCP wiring, and stdlib has no TOML writer.
-CODEX_SHARED_KEYS = ("model", "model_reasoning_effort")
+CODEX_SHARED_KEYS = ("model", "model_reasoning_effort", "service_tier")
 
 T3_SHARED = ("keybindings.json",)
 T3_MACHINE = ("settings.json", "client-settings.json")
 
-# Values in config.toml that look like credentials are redacted in the snapshot.
+# Anything that looks like a credential never reaches the repo. In config.toml: a key whose name
+# looks secret (basic or literal string, so "..." and '...'), and any Bearer/Basic value, which
+# catches inline Authorization headers such as http_headers = { Authorization = "Bearer ..." }.
+SECRET_NAME = r"[A-Za-z0-9_]*(?:token|secret|password|passwd|api_?key|auth|credential|cookie|private)[A-Za-z0-9_]*"
 SECRET_LINE = re.compile(
-    r'^(\s*[A-Za-z0-9_]*(?:token|secret|password|api_key)[A-Za-z0-9_]*\s*=\s*)"[^"]*"',
+    r"""^(\s*"?""" + SECRET_NAME + r"""\"?\s*=\s*)(?:"(?:[^"\\]|\\.)*"|'[^']*')""",
     re.IGNORECASE | re.MULTILINE,
 )
+SECRET_SCHEME = re.compile(r"""(["'](?:Bearer|Basic)\s+)[^"']+""", re.IGNORECASE)
+SECRET_ENV_KEY = re.compile(SECRET_NAME, re.IGNORECASE)
+REDACTED = "<redacted>"
+
+
+def redact_toml(text: str) -> str:
+    return SECRET_SCHEME.sub(r"\1" + REDACTED, SECRET_LINE.sub(r'\1"' + REDACTED + '"', text))
+
+
+def split_env(settings: dict) -> tuple[dict, dict]:
+    """Return (settings with secret-looking env values redacted, the secret env values)."""
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        return settings, {}
+    secrets = {k: v for k, v in env.items() if SECRET_ENV_KEY.search(k)}
+    if not secrets:
+        return settings, {}
+    clean = dict(settings)
+    clean["env"] = {k: (REDACTED if k in secrets else v) for k, v in env.items()}
+    return clean, secrets
 
 
 def machine_env() -> dict:
@@ -110,6 +133,9 @@ def claude_capture(log) -> None:
     live = read_json(HOME / ".claude/settings.json")
     if live is None:
         return log("claude: no settings.json, skipped")
+    live, secrets = split_env(live)
+    if secrets:
+        log(f"claude: redacted {len(secrets)} secret-looking env value(s); they stay in the live file only")
     shared = {k: v for k, v in live.items() if k in CLAUDE_SHARED}
     local = {k: v for k, v in live.items() if k not in CLAUDE_SHARED}
     write_json(STORE / "claude/shared.json", shared)
@@ -123,9 +149,20 @@ def claude_apply(log) -> None:
     if local is None:
         return log(f"claude: no settings/claude/{HOST}.json, refusing to apply (create it on the controller)")
     target = HOME / ".claude/settings.json"
+    merged = deep_merge(local, shared)
     if target.exists():
         shutil.copy(target, target.with_suffix(".json.bak"))
-    write_json(target, deep_merge(local, shared))
+        # Redacted env values come back from the live file, never from the repo.
+        _, live_secrets = split_env(read_json(target) or {})
+        env = merged.get("env")
+        if isinstance(env, dict):
+            for k, v in list(env.items()):
+                if v == REDACTED:
+                    if k in live_secrets:
+                        env[k] = live_secrets[k]
+                    else:
+                        del env[k]
+    write_json(target, merged)
     log(f"claude: applied shared + {HOST} (previous saved to settings.json.bak)")
 
 
@@ -135,7 +172,7 @@ def codex_capture(log) -> None:
         return log("codex: no config.toml, skipped")
     dest = STORE / f"codex/{HOST}.toml"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(SECRET_LINE.sub(r'\1"<redacted>"', live.read_text()))
+    dest.write_text(redact_toml(live.read_text()))
     log(f"codex: snapshotted config.toml (secrets redacted)")
 
 

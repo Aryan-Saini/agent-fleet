@@ -175,10 +175,10 @@ kernel that hangs costs one failed boot, not the box. Two lessons from those run
 
 ## Sudo across machines
 
-Unattended work needs root on both machines without a human typing a password. The two sides
-solve it differently.
+Unattended work needs root without a human typing a password. Two patterns follow, one per OS.
+Pick per machine, and choose the narrowest one your automations can live with.
 
-### The worker: passwordless sudo for its user
+### Linux worker option: passwordless sudo for its user
 
 ```bash
 echo '<user> ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/90-<user>-nopasswd
@@ -186,22 +186,28 @@ sudo chmod 440 /etc/sudoers.d/90-<user>-nopasswd
 sudo visudo -cf /etc/sudoers.d/90-<user>-nopasswd     # syntax check, or sudo breaks
 ```
 
-Now `ssh <worker> sudo systemctl restart <unit>` works from the controller with no prompt. Why
-this is acceptable here:
+Then `ssh <worker> sudo systemctl restart <unit>` works from the controller with no prompt. What
+keeps this from being reckless:
 
-- Only tailnet members reach the worker's ssh. There is no public port, and keys are the only
-  login method.
+- Only tailnet members reach the worker's ssh. No public port, keys are the only login method.
 - Agents still follow the disconnect-risk rule. Passwordless sudo removes a prompt, not the
   judgment about what to run.
-- Dev servers run in systemd units with `NoNewPrivileges=yes`, so code from an npm dependency
-  cannot escalate through sudo.
 
-The cost, stated plainly: any process running as your user on the worker is root. A compromised
-dependency that runs outside such a unit, or a stolen key for a tailnet device, owns the box.
-To narrow it, scope the drop-in to specific commands (`NOPASSWD: /usr/bin/systemctl,
-/usr/bin/pacman`) and accept that agents will hit walls more often.
+The cost, stated plainly: **any code running as that user is root.** That includes every npm
+dependency a dev server or test suite runs. `NoNewPrivileges=yes` on a unit only stops processes
+inside that unit from gaining privileges directly (setuid, sudo). The same code can still ask
+your user's systemd manager to start a fresh unit without the flag, or edit a script your
+automations run later, and get root that way. It is a speed bump, not a boundary.
 
-### The controller: a password in the Keychain and `sudo -A`
+If the worker runs untrusted code, the boundary that holds is a **separate account**: run dev
+servers and test suites as a user with no sudo, no access to your user's systemd manager, and no
+write access to your home, automations or keys. Narrowing sudoers to `systemctl` or `pacman` does
+not help either: both can run arbitrary code as root (load a unit you wrote, install a package
+with a hook). To narrow sudo for real, allow only root-owned wrapper scripts that perform one
+fixed operation each and validate their arguments, for example
+`NOPASSWD: /usr/local/sbin/fleet-restart-unit`, where the wrapper accepts only names on a list.
+
+### macOS controller option: a password in the Keychain and `sudo -A`
 
 The controller keeps its sudo password. Unattended jobs, nightly updates and the worker (over
 `ssh <controller>`) use `sudo -A`, which asks a helper program for the password instead of a

@@ -17,9 +17,9 @@ page is the working commands.
 
 ## 1. Commands
 
-Long jobs go in tmux (`tmux new -s <name>`) so they survive the connection dropping. `sudo` on
-the worker is passwordless; on the controller use `sudo -A` with the Keychain askpass helper
-([architecture.md](architecture.md#sudo-across-machines)).
+Long jobs go in tmux (`tmux new -s <name>`) so they survive the connection dropping. For root
+without a prompt, see the options and their tradeoffs in
+[architecture.md](architecture.md#sudo-across-machines).
 
 **Non-interactive ssh gets a stripped PATH.** This looks exactly like a missing install:
 

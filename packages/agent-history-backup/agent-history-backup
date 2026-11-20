@@ -73,6 +73,9 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 EXCLUDES=(
   --exclude "*.DS_Store" --exclude "node_modules" --exclude "*.tmp"
   --exclude "*-wal" --exclude "*-shm" --exclude "*.sock"
+  # Raw VS Code-style stores are snapshotted through SQLite below; a raw copy without its WAL
+  # can silently miss recent writes.
+  --exclude "state.vscdb" --exclude "state.vscdb.backup"
   --exclude "Cache" --exclude "GPUCache"
 )
 
@@ -98,6 +101,18 @@ snapshot_sqlite() {
   note "snapshotted $2 ($(du -h "$snap" | cut -f1))"
 }
 
+# snapshot_workspaces <workspaceStorage-dir> <stage-relpath>: every per-workspace state.vscdb,
+# copied through SQLite. The raw files are excluded from the restic run above.
+snapshot_workspaces() {
+  local dir="$1" rel="$2" db id
+  [ -d "$dir" ] || return 0
+  for db in "$dir"/*/state.vscdb; do
+    [ -f "$db" ] || continue
+    id=$(basename "$(dirname "$db")")
+    snapshot_sqlite "$db" "$rel/$id/state.sqlite" >/dev/null || true
+  done
+}
+
 # Cursor's globalStorage/state.vscdb can be several GB, most of it runtime state. Extract only
 # the conversation keys, and only when the source changed. The extract lives outside $STAGE so
 # an idle Cursor costs nothing but still appears in every snapshot.
@@ -107,17 +122,20 @@ extract_cursor_chats() {
   local db="$CURSOR_GLOBAL/state.vscdb" stamp="$STATE_DIR/cursor-state.vscdb.mtime"
   local out="$STAGE/cursor-chats.sqlite" now prev extra="" convos
   if [ ! -f "$db" ]; then note "skip cursor-ide/chats.sqlite (absent)"; return 0; fi
-  now=$(mtime_size "$db"); prev=$(cat "$stamp" 2>/dev/null || true)
+  # Recent writes can sit entirely in the WAL and leave the main file untouched, so both count.
+  now="$(mtime_size "$db") $( [ -f "$db-wal" ] && mtime_size "$db-wal" )"
+  prev=$(cat "$stamp" 2>/dev/null || true)
   if [ "$now" = "$prev" ] && [ -f "$CURSOR_EXTRACT" ]; then
     note "cursor-ide/chats.sqlite unchanged since last run"; return 0
   fi
   # composerHeaders exists only in newer builds; copy it when present instead of assuming.
-  if [ -n "$(sqlite3 "file:$db?immutable=1" \
+  if [ -n "$(sqlite3 "file:$db?mode=ro" \
        "select 1 from sqlite_master where type='table' and name='composerHeaders'" 2>/dev/null)" ]; then
     extra="CREATE TABLE o.composerHeaders AS SELECT * FROM composerHeaders;"
   fi
-  # immutable=1 reads without a lock while Cursor holds the file. Safe: a changed mtime got us here.
-  if ! sqlite3 "file:$db?immutable=1" <<SQL
+  # mode=ro reads through the WAL like any other reader (immutable=1 would ignore it), and WAL
+  # readers don't block Cursor or get blocked by it.
+  if ! sqlite3 "file:$db?mode=ro" <<SQL
 ATTACH DATABASE '$out' AS o;
 CREATE TABLE o.cursorDiskKV(key TEXT PRIMARY KEY, value BLOB);
 INSERT INTO o.cursorDiskKV SELECT key,value FROM cursorDiskKV
@@ -160,6 +178,7 @@ extract_cursor_chats
 [ -f "$CURSOR_GLOBAL/conversation-search.db" ] &&
   snapshot_sqlite "$CURSOR_GLOBAL/conversation-search.db" "cursor-ide/conversation-search.db"
 add_path "$APPSUP/Cursor/User/workspaceStorage"
+snapshot_workspaces "$APPSUP/Cursor/User/workspaceStorage" cursor-ide/workspaceStorage
 # opencode.
 snapshot_sqlite "$HOME/.local/share/opencode/opencode.db" "opencode/opencode.db"
 # T3 Code: the event store holding every thread, and attachments. Only these two: userdata/ also
@@ -174,7 +193,10 @@ add_path "$HOME/.t3/userdata/attachments"
 if [ "$OS" = Darwin ]; then
   [ -f "$APPSUP/Antigravity/User/globalStorage/state.vscdb" ] &&
     snapshot_sqlite "$APPSUP/Antigravity/User/globalStorage/state.vscdb" "antigravity/globalStorage.vscdb"
-  [ -d "$APPSUP/Antigravity/User/workspaceStorage" ] && add_path "$APPSUP/Antigravity/User/workspaceStorage"
+  if [ -d "$APPSUP/Antigravity/User/workspaceStorage" ]; then
+    add_path "$APPSUP/Antigravity/User/workspaceStorage"
+    snapshot_workspaces "$APPSUP/Antigravity/User/workspaceStorage" antigravity/workspaceStorage
+  fi
   [ -f "$APPSUP/Wispr Flow/flow.sqlite" ] &&
     snapshot_sqlite "$APPSUP/Wispr Flow/flow.sqlite" "wispr-flow/flow.sqlite"
 fi

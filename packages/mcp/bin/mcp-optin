@@ -3,7 +3,7 @@
 #
 #   mcp-optin [path] [--only a,b] [--no-peer]     path defaults to the current directory
 #
-# Writes, idempotently (no diff on a re-run):
+# Merges into, idempotently (no diff on a re-run; other servers and settings are kept):
 #   <repo>/.mcp.json               Claude Code definitions, "Bearer ${NAME_API_KEY}", never a key
 #   <repo>/.cursor/mcp.json        Cursor definitions, "${env:NAME_API_KEY}"
 #   <repo>/.claude/settings.json   enabledMcpjsonServers, so a fresh clone needs no approval edits
@@ -56,29 +56,52 @@ r = sys.argv[1]
 servers = json.loads(os.environ["SERVERS_JSON"])
 want = [s for s in os.environ["MCP_SERVERS"].split(",") if s]
 
-def write_if_changed(path, data):
-    if os.path.exists(path):
-        try:
-            if json.load(open(path)) == data:
-                return
-        except json.JSONDecodeError:
-            pass
+def load(path):
+    """Existing JSON, or {} when absent. Malformed JSON stops the run instead of being replaced."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        sys.exit(f"mcp-optin: {path} is not valid JSON ({e}); fix it by hand, nothing was written")
+    if not isinstance(data, dict):
+        sys.exit(f"mcp-optin: {path} is not a JSON object; nothing was written")
+    return data
+
+def write_if_changed(path, data, before):
+    if data == before:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
 
-claude = {"mcpServers": {n: {"type": "http", "url": servers[n]["url"],
-          "headers": {"Authorization": "Bearer ${%s}" % servers[n]["key"]}} for n in want}}
-cursor = {"mcpServers": {n: {"url": servers[n]["url"],
-          "headers": {"Authorization": "Bearer ${env:%s}" % servers[n]["key"]}} for n in want}}
-write_if_changed(os.path.join(r, ".mcp.json"), claude)
-write_if_changed(os.path.join(r, ".cursor", "mcp.json"), cursor)
+# Only servers this script manages are touched: the wanted ones are written, managed ones left out
+# of --only are removed, and every other entry stays as it was.
+managed = set(servers)
+def merge_servers(path, entries):
+    before = load(path)
+    data = json.loads(json.dumps(before))
+    current = data.setdefault("mcpServers", {})
+    for name in managed - set(entries):
+        current.pop(name, None)
+    current.update(entries)
+    write_if_changed(path, data, before)
+
+merge_servers(os.path.join(r, ".mcp.json"),
+    {n: {"type": "http", "url": servers[n]["url"],
+         "headers": {"Authorization": "Bearer ${%s}" % servers[n]["key"]}} for n in want})
+merge_servers(os.path.join(r, ".cursor", "mcp.json"),
+    {n: {"url": servers[n]["url"],
+         "headers": {"Authorization": "Bearer ${env:%s}" % servers[n]["key"]}} for n in want})
 
 p = os.path.join(r, ".claude", "settings.json")
-d = json.load(open(p)) if os.path.exists(p) else {}
+before = load(p)
+d = json.loads(json.dumps(before))
 d["enableAllProjectMcpServers"] = False
-d["enabledMcpjsonServers"] = sorted(want)
-write_if_changed(p, d)
+d["enabledMcpjsonServers"] = sorted((set(d.get("enabledMcpjsonServers", [])) - managed) | set(want))
+write_if_changed(p, d, before)
 PY
 
 # Trust locally. Until hasTrustDialogAccepted is true, Claude Code strips enabledMcpjsonServers
@@ -109,7 +132,8 @@ if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$MCP_OPTIN_PEER" true 2>/dev/nul
 fi
 
 # On the peer: find the checkout whose normalized remote matches, then trust it there.
-ssh "$MCP_OPTIN_PEER" "REMOTE='$REMOTE' MCP_SERVERS='$MCP_SERVERS' python3 -" <<'PY' || echo "  peer: failed, run mcp-optin there"
+# Values travel as %q-escaped words, so a quote or $(...) in a remote URL can't run on the peer.
+ssh "$MCP_OPTIN_PEER" "REMOTE=$(printf %q "$REMOTE") MCP_SERVERS=$(printf %q "$MCP_SERVERS") python3 -" <<'PY' || echo "  peer: failed, run mcp-optin there"
 import json, os, re, subprocess
 
 def norm(url):

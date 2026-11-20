@@ -30,7 +30,8 @@ Both answer with `{"data":[{"b64_json": "..."}], "quality": ..., "size": ...}`. 
 decodes `b64_json` to a PNG. `<hub-url>` already ends in `/v1`.
 
 The script reads the hub address and its bearer token from `[model_providers.cliproxy]` in
-`~/.codex/config.toml` (`base_url`, `experimental_bearer_token`), the same block that points
+`~/.codex/config.toml`: `base_url`, and the token from the variable `env_key` names (or an
+inline `experimental_bearer_token`). It is the same block that points
 Codex at the hub. So the controller uses the hub's tailnet URL and the worker uses
 `http://127.0.0.1:<port>/v1`, with no extra config. No OpenAI API key and no API credits: the
 images count against the subscription.
