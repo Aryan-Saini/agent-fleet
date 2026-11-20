@@ -1,0 +1,27 @@
+{
+  "timezone": "America/New_York",
+  "icloud_credentials": "~/.config/icloud/caldav.json",
+  "google_service_account_key": "~/.config/gcloud/keys/<calendar-mirror-sa>.json",
+
+  "icloud_calendars": ["Personal", "Work", "Courses", "Routine"],
+  "google_calendars": { "Work (Google)": "<you>@<company>.com" },
+  "self_addresses": ["<you>@<company>.com"],
+
+  "past_days": 14,
+  "future_days": 120,
+
+  "availability": {
+    "calendar_name": "<Your Name> - Availability",
+    "busy_title": "<Your Name> - Busy",
+    "access": { "<you>@<company>.com": "owner" },
+    "publish_calendars": ["Personal", "Work", "Courses", "Work (Google)"],
+    "skip_titles": ["Sleep", "Wake Up", "<placeholder meeting you never treat as busy>"],
+    "skip_prefixes": ["DUE "]
+  },
+
+  "private_copy": {
+    "calendar_name": "<Your Name> Apple Calendar",
+    "access": { "<you>@<company>.com": "owner" },
+    "colors": { "Routine": "2", "Courses": "9", "Work": "6", "Personal": "3" }
+  }
+}

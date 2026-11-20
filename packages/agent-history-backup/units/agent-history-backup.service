@@ -1,0 +1,13 @@
+# Linux workers: copy agent-history-backup to ~/.local/bin and these two units to
+# ~/.config/systemd/user/, then: systemctl --user enable --now agent-history-backup.timer
+[Unit]
+Description=Back up agent chat history to the restic repo
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-history-backup
+# Background job: stay out of the way of interactive work.
+Nice=10
+IOSchedulingClass=idle

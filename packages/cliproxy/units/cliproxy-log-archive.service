@@ -1,0 +1,12 @@
+[Unit]
+Description=Archive CLIProxyAPI request logs to S3, zstd-compressed
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cliproxy-log-archive
+# Not secret, but yours: set them here or in a drop-in, never commit a key.
+Environment=ARCHIVE_BUCKET=<your-bucket>
+Environment=ARCHIVE_PREFIX=<worker>/cliproxy-logs
+# Packing a day of logs at zstd -19 is CPU-heavy; stay out of the way of interactive work.
+Nice=19
+IOSchedulingClass=idle

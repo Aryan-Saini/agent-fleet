@@ -1,0 +1,176 @@
+#!/bin/sh
+# worker-expose: put a dev server on the worker in front of your tailnet devices (controller,
+# phone; at home or away) over HTTPS, without exposing it to the LAN. packages/dev-server.
+#
+#   worker-expose add [--keep] <name> <dir> <port> ['<cmd>']
+#                                    run cmd (ONE shell string, default "pnpm dev") in dir as
+#                                    devserver@<name>. --keep exempts it from reap.
+#   worker-expose rm <name>          stop it and drop its HTTPS mapping
+#   worker-expose ls                 list servers, state, URLs and when each expires
+#   worker-expose reap               rm every server added more than 24h ago, unless kept
+#
+# Servers are temporary: the devserver-reap timer runs reap hourly, so a server lives 24h from
+# its last add (the config file's mtime). Running add again restarts the clock. Only long-lived
+# infra other tools rely on is added with --keep, and add preserves --keep on a server that
+# already had it.
+#
+# The app must listen on loopback only: 'pnpm dev -H localhost' for Next (not 127.0.0.1, which
+# breaks Next's internal rewrites behind the proxy), '--host localhost' for Vite. A typical
+# worker firewall accepts LAN traffic, so add refuses to finish (and stops the server) if it
+# listens anywhere else. The proxy targets localhost, which covers both 127.0.0.1 and ::1. The
+# HTTPS port is always <port> + 10000, so 3002 is https://<worker>.<tailnet>.ts.net:13002: a real
+# cert and tailnet only, so browsers treat it as a secure context. The app may need that
+# hostname in its dev host allowlist (Next allowedDevOrigins, Vite server.allowedHosts).
+#
+# WORKER_EXPOSE_HOST overrides the hostname; by default it is this machine's MagicDNS name.
+set -eu
+CONF="$HOME/.config/devservers"
+HOST=${WORKER_EXPOSE_HOST:-$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}
+NL='
+'
+TTL=$((24 * 3600))
+
+die() { echo "worker-expose: $*" >&2; exit 1; }
+[ "$(id -u)" -ne 0 ] || die "run as your own user, not root (systemctl --user and \$HOME would be root's)"
+[ -n "$HOST" ] || die "no MagicDNS name for this machine (is tailscale up?); set WORKER_EXPOSE_HOST"
+
+valid_name() { case $1 in '' | .* | *[!A-Za-z0-9_.-]*) return 1 ;; esac; }
+
+# 1..55535 in plain decimal, so <port> + 10000 lands in 10001..65535 and can never reach the
+# hand-made mappings below 10001 (443 for T3 Code, for one).
+valid_port() {
+  case $1 in '' | 0* | *[!0-9]*) return 1 ;; esac
+  [ ${#1} -le 5 ] && [ "$1" -le 55535 ]
+}
+
+# Sources an instance's config (DIR, PORT, CMD, KEEP) and validates it.
+load() {
+  valid_name "$1" && [ -f "$CONF/$1.conf" ] || die "unknown server: $1"
+  DIR='' PORT='' CMD='' KEEP=''
+  . "$CONF/$1.conf"
+  valid_port "$PORT" || die "$CONF/$1.conf has an invalid PORT: $PORT"
+}
+
+# Seconds left before reap removes <name>, or empty when it is kept.
+ttl_left() {
+  [ "$(sed -n 's/^KEEP=//p' "$CONF/$1.conf")" = 1 ] && return 0
+  echo $((TTL - $(date +%s) + $(stat -c %Y "$CONF/$1.conf")))
+}
+
+# Single-quotes a value for the shell config file (values never contain line breaks).
+quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# Where the HTTPS mapping for backend <port> currently proxies to, or empty.
+serve_target() {
+  tailscale serve status --json |
+    jq -r --arg k "$HOST:$(($1 + 10000))" '.Web[$k].Handlers["/"].Proxy // empty'
+}
+
+is_ours() { case $2 in "http://127.0.0.1:$1" | "http://localhost:$1") return 0 ;; esac; return 1; }
+
+# Drops the HTTPS mapping for backend <port>, but only if it proxies to that backend.
+unserve() {
+  t=$(serve_target "$1")
+  if is_ours "$1" "$t"; then
+    tailscale serve --https="$(($1 + 10000))" off >/dev/null
+  elif [ -n "$t" ]; then
+    echo "worker-expose: leaving :$(($1 + 10000)) alone, it proxies to $t" >&2
+  fi
+}
+
+# Local addresses listening on <port>, one per line; and the ones that are not loopback.
+listeners() { ss -Hltn "sport = :$1" | awk '{print $4}'; }
+exposed() { listeners "$1" | grep -v -e "^127\.[0-9.]*:$1\$" -e "^\[::1\]:$1\$" || true; }
+
+case "${1:-}" in
+add)
+  shift
+  keep=''
+  [ "${1:-}" != --keep ] || { keep=1; shift; }
+  [ $# -eq 3 ] || [ $# -eq 4 ] || die "usage: worker-expose add [--keep] <name> <dir> <port> ['<cmd>']"
+  name=$1 port=$3 cmd=${4:-pnpm dev} unit="devserver@$1"
+  [ -n "$keep" ] || keep=$(sed -n 's/^KEEP=//p' "$CONF/$name.conf" 2>/dev/null || true)
+  valid_name "$name" || die "name may only use letters, digits, . _ - and not start with ."
+  valid_port "$port" || die "port must be 1-55535"
+  dir=$(cd "$2" 2>/dev/null && pwd -P) || die "no such directory: $2"
+  case $dir$cmd in *"$NL"*) die "dir and cmd may not contain line breaks" ;; esac
+  for f in "$CONF"/*.conf; do
+    [ -e "$f" ] && [ "$f" != "$CONF/$name.conf" ] || continue
+    [ "$(sed -n 's/^PORT=//p' "$f")" != "$port" ] || die "port $port is used by $(basename "$f" .conf)"
+  done
+  t=$(serve_target "$port")
+  [ -z "$t" ] || is_ours "$port" "$t" || die ":$((port + 10000)) is already mapped to $t"
+
+  old=$(sed -n 's/^PORT=//p' "$CONF/$name.conf" 2>/dev/null || true)
+  systemctl --user stop "$unit" 2>/dev/null || true
+  [ -z "$(listeners "$port")" ] || die "something else is already listening on :$port"
+  if valid_port "$old" && [ "$old" != "$port" ]; then unserve "$old"; fi
+
+  mkdir -p -m 700 "$CONF"
+  (umask 077 && printf 'DIR=%s\nPORT=%s\nCMD=%s\nKEEP=%s\n' "$(quote "$dir")" "$port" "$(quote "$cmd")" "$keep" >"$CONF/$name.conf")
+  fail() {
+    systemctl --user disable --now "$unit" 2>/dev/null || true
+    die "$* (stopped it; logs: journalctl --user -u $unit)"
+  }
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$unit" 2>/dev/null || true
+  systemctl --user enable --now "$unit" 2>/dev/null
+
+  i=0
+  while [ -z "$(listeners "$port")" ]; do
+    i=$((i + 1))
+    [ $i -le 120 ] && systemctl --user is-active -q "$unit" || fail "$unit never listened on :$port"
+    sleep 1
+  done
+  sleep 2
+  bad=$(exposed "$port")
+  [ -z "$bad" ] || fail "$unit listens on $(echo $bad), not just loopback; make cmd bind localhost"
+
+  unserve "$port"
+  tailscale serve --bg --https="$((port + 10000))" "http://localhost:$port" >/dev/null ||
+    fail "tailscale serve failed"
+  echo "devserver@$name: https://$HOST:$((port + 10000))"
+  echo "logs: journalctl --user -u $unit -f"
+  [ "$keep" = 1 ] && echo "kept: reap never removes it" || echo "temporary: reap removes it in 24h"
+  ;;
+rm)
+  [ $# -eq 2 ] || die "usage: worker-expose rm <name>"
+  load "$2"
+  systemctl --user disable --now "devserver@$2" 2>/dev/null || true
+  systemctl --user reset-failed "devserver@$2" 2>/dev/null || true
+  unserve "$PORT"
+  rm -f "$CONF/$2.conf"
+  ;;
+ls)
+  for f in "$CONF"/*.conf; do
+    [ -e "$f" ] || continue
+    name=$(basename "$f" .conf)
+    (
+      load "$name"
+      note=''
+      [ -d "$DIR" ] || note=' (dir missing)'
+      [ -z "$(exposed "$PORT")" ] || note="$note (EXPOSED beyond loopback)"
+      left=$(ttl_left "$name")
+      if [ -z "$left" ]; then life=keep; elif [ "$left" -le 0 ]; then life=expired; else life="$((left / 3600))h$((left % 3600 / 60))m"; fi
+      printf '%-22s %-9s %-8s https://%s:%s  %s%s\n' "$name" \
+        "$(systemctl --user is-active "devserver@$name" || true)" "$life" "$HOST" "$((PORT + 10000))" \
+        "$DIR" "$note"
+    ) || true
+  done
+  ;;
+reap)
+  for f in "$CONF"/*.conf; do
+    [ -e "$f" ] || continue
+    name=$(basename "$f" .conf)
+    valid_name "$name" || continue
+    left=$(ttl_left "$name")
+    [ -n "$left" ] && [ "$left" -le 0 ] || continue
+    added=$(date -d "@$(stat -c %Y "$f")" '+%F %H:%M')
+    if "$0" rm "$name"; then echo "reaped $name (added $added)"; else echo "worker-expose: failed to reap $name" >&2; fi
+  done
+  ;;
+*)
+  sed -n '2,25s/^# \{0,1\}//p' "$0"
+  [ -z "${1:-}" ] || exit 1
+  ;;
+esac

@@ -34,7 +34,9 @@ the report. **The worker may lose the current task; it may never stay down or st
 - controller to worker: `ssh <worker>`, files with `fleet send <worker> <file>`
 - worker to controller: `ssh <laptop>`, files with `fleet send <laptop> <file>`
 - either way, lazily: drop it in `~/drop`, Syncthing carries it in ~15-25s
-- a dev server on the other machine: `http://<worker>:3000` (bind it to 0.0.0.0)
+- a dev server on the worker: bind it to localhost and serve it with `tailscale serve`, at
+  `https://<worker>.<tailnet>.ts.net:<port + 10000>`. Binding `0.0.0.0` also exposes it to the
+  home LAN with no auth
 - get the human's attention from anywhere: `fleet alert "title" "message"`
 
 ## Drop folder
@@ -49,4 +51,4 @@ the report. **The worker may lose the current task; it may never stay down or st
 | machine | packages |
 | --- | --- |
 | <laptop> | tailscale drop-folder peekaboo |
-| <worker> | tailscale drop-folder agent-clis t3-remote screenshare os-update |
+| <worker> | tailscale drop-folder agent-clis t3-remote halo os-update |

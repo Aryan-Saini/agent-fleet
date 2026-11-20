@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""settings-sync: share agent settings across the fleet, one way, controller to workers.
+
+Each harness's settings split three ways:
+
+  shared    identical everywhere and worth propagating: model, effort, hooks, behavior flags
+  machine   deliberately different per machine: permissions, plugin sets, absolute paths
+  ignored   secrets, caches, window geometry, tokens. Never tracked
+
+  settings-sync capture   live -> repo. Controller only; refuses elsewhere, so a sparsely
+                          configured worker can never overwrite the fleet's shared keys.
+  settings-sync apply     repo -> live: the machine's own file with shared.json merged on top.
+                          Backs up the live file first. Workers run it after every sync.
+  settings-sync check     report drift in keys that must match everywhere.
+
+Layout, in your fleet repo:
+  settings/claude/shared.json        shared Claude Code keys
+  settings/claude/<machine>.json     that machine's own keys, edited on the controller like any file
+  settings/codex/<machine>.toml      Codex config snapshots, secrets redacted. Never applied
+  settings/t3/shared/, t3/<machine>/ T3 Code keybindings (shared) and settings (per machine)
+
+Machine name and role come from FLEET_NAME / FLEET_ROLE, else ~/.config/fleet/machine.env.
+Edit CLAUDE_SHARED below to choose which keys travel.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import socket
+import sys
+from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # older Pythons: drift check is skipped
+    tomllib = None
+
+HOME = Path.home()
+FLEET = Path(__file__).resolve().parents[3]   # packages/settings-sync/bin/settings-sync
+STORE = FLEET / "settings"
+
+# Claude Code keys that should be identical everywhere. Everything else in settings.json is
+# machine-specific, notably `permissions`, which is usually looser on the controller you sit at
+# than on an unattended worker.
+CLAUDE_SHARED = {
+    "model",
+    "effortLevel",
+    "includeCoAuthoredBy",
+    "autoMemoryEnabled",
+    "theme",
+    "enabledMcpjsonServers",
+    "deniedMcpServers",
+    "hooks",
+}
+
+# Codex keys that must agree across machines. Checked, never rewritten: config.toml also holds
+# the trusted project list and MCP wiring, and stdlib has no TOML writer.
+CODEX_SHARED_KEYS = ("model", "model_reasoning_effort")
+
+T3_SHARED = ("keybindings.json",)
+T3_MACHINE = ("settings.json", "client-settings.json")
+
+# Values in config.toml that look like credentials are redacted in the snapshot.
+SECRET_LINE = re.compile(
+    r'^(\s*[A-Za-z0-9_]*(?:token|secret|password|api_key)[A-Za-z0-9_]*\s*=\s*)"[^"]*"',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def machine_env() -> dict:
+    env = {}
+    p = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "fleet/machine.env"
+    if p.exists():
+        for line in p.read_text().splitlines():
+            m = re.match(r"^(FLEET_NAME|FLEET_ROLE)=\"?([^\"#\s]*)", line)
+            if m:
+                env[m.group(1)] = m.group(2)
+    return env
+
+
+ENV = machine_env()
+HOST = os.environ.get("FLEET_NAME") or ENV.get("FLEET_NAME") or socket.gethostname().split(".")[0].lower()
+ROLE = os.environ.get("FLEET_ROLE") or ENV.get("FLEET_ROLE") or "unset"
+
+
+def read_json(path: Path):
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def deep_merge(base: dict, over: dict) -> dict:
+    """Merge `over` onto `base`. Dicts recurse; everything else is replaced."""
+    out = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def claude_capture(log) -> None:
+    live = read_json(HOME / ".claude/settings.json")
+    if live is None:
+        return log("claude: no settings.json, skipped")
+    shared = {k: v for k, v in live.items() if k in CLAUDE_SHARED}
+    local = {k: v for k, v in live.items() if k not in CLAUDE_SHARED}
+    write_json(STORE / "claude/shared.json", shared)
+    write_json(STORE / f"claude/{HOST}.json", local)
+    log(f"claude: captured {len(shared)} shared + {len(local)} {HOST}-only keys")
+
+
+def claude_apply(log) -> None:
+    shared = read_json(STORE / "claude/shared.json") or {}
+    local = read_json(STORE / f"claude/{HOST}.json")
+    if local is None:
+        return log(f"claude: no settings/claude/{HOST}.json, refusing to apply (create it on the controller)")
+    target = HOME / ".claude/settings.json"
+    if target.exists():
+        shutil.copy(target, target.with_suffix(".json.bak"))
+    write_json(target, deep_merge(local, shared))
+    log(f"claude: applied shared + {HOST} (previous saved to settings.json.bak)")
+
+
+def codex_capture(log) -> None:
+    live = HOME / ".codex/config.toml"
+    if not live.exists():
+        return log("codex: no config.toml, skipped")
+    dest = STORE / f"codex/{HOST}.toml"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(SECRET_LINE.sub(r'\1"<redacted>"', live.read_text()))
+    log(f"codex: snapshotted config.toml (secrets redacted)")
+
+
+def codex_check(log) -> list[str]:
+    snaps = sorted((STORE / "codex").glob("*.toml"))
+    if tomllib is None or len(snaps) < 2:
+        return []
+    loaded = {p.stem: tomllib.loads(p.read_text()) for p in snaps}
+    drift = []
+    for key in CODEX_SHARED_KEYS:
+        values = {h: cfg.get(key) for h, cfg in loaded.items()}
+        if len(set(map(repr, values.values()))) > 1:
+            drift.append(f"codex.{key}: " + ", ".join(f"{h}={v!r}" for h, v in values.items()))
+    for line in drift:
+        log(f"DRIFT {line}")
+    return drift
+
+
+def t3_copy(direction: str, log) -> None:
+    live = HOME / ".t3/userdata"
+    if not live.exists():
+        return log("t3: no userdata, skipped")
+    done = []
+    for names, sub in ((T3_SHARED, "shared"), (T3_MACHINE, HOST)):
+        for name in names:
+            repo = STORE / "t3" / sub / name
+            src, dst = (live / name, repo) if direction == "capture" else (repo, live / name)
+            if src.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(src, dst)
+                done.append(name)
+    log(f"t3: {direction} {', '.join(done) if done else 'nothing'}")
+
+
+def main() -> int:
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
+    lines: list[str] = []
+    log = lines.append
+    if cmd == "capture":
+        if ROLE != "controller":
+            print(f"settings-sync: capture is controller-only, refusing on {HOST} (role {ROLE}). "
+                  "Edit settings/ on the controller and sync.", file=sys.stderr)
+            return 1
+        claude_capture(log)
+        codex_capture(log)
+        t3_copy("capture", log)
+        codex_check(log)
+    elif cmd == "apply":
+        claude_apply(log)
+        t3_copy("apply", log)
+        log("codex: snapshot only, never applied; restore by hand from settings/codex/")
+    elif cmd == "check":
+        if not codex_check(log):
+            log("no drift in shared keys")
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    print(f"[{HOST}] settings-sync {cmd}")
+    for line in lines:
+        print(f"  {line}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

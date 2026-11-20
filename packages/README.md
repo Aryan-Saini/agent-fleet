@@ -18,7 +18,8 @@ then re-run `./install.sh` so any `bin/` scripts land on PATH.
 | `bin/` | no | commands linked into `~/.local/bin` |
 | `npm` | no | npm packages this package ships as, one per line. `./install.sh` installs them globally, `fleet link` links each one's `skills/`, `/fleet-update` updates them |
 | `install.sh` | no | setup `./install.sh` runs for this package. Idempotent; prints steps only a human can do (a login) instead of attempting them |
-| `*.sh` | no | reference implementations, such as a work order per OS |
+| `units/`, `*.plist` | no | systemd units and launchd plist templates (`__HOME__` placeholders) that `install.sh` or the README copies into place |
+| other files | no | reference implementations to copy and adapt, such as a work order per OS or a job script |
 
 ## Any OS
 
@@ -40,16 +41,25 @@ next to the original (`check.sh` handling one more `uname -s` case, or `windows.
 
 | package | for | what |
 | --- | --- | --- |
-| [tailscale](tailscale/) | every machine | the private network and ssh from anywhere |
-| [drop-folder](drop-folder/) | every machine | `~/drop` synced everywhere by Syncthing |
+| [tailscale](tailscale/) | every machine | the private network, ssh from anywhere, `serve` for HTTPS, sharing across tailnets |
+| [drop-folder](drop-folder/) | every machine | `~/drop` on every machine; `to-worker` / `to-controller` push files, Syncthing optional |
 | [always-on](always-on/) | workers | never sleep, come back after power loss, run headless |
 | [agent-clis](agent-clis/) | workers | catch expired Claude, Codex, Cursor, opencode and gh logins |
 | [accounts](accounts/) | every machine | which logins and API keys you need, and how keys reach every machine |
-| [t3-remote](t3-remote/) | workers, controllers | install T3 Code (stable or nightly) and drive agents from a phone |
-| [postdraft](postdraft/) | every machine | agents publish plans, reports and files as links, on your own server (npm) |
-| [screenshare](screenshare/) | controller + headless worker | see and click a browser on a box with no screen (npm), and a Mac from your phone (Sill) |
+| [settings-sync](settings-sync/) | every machine | Claude, Codex and T3 settings shared one way with per-machine overlays; `repo-sync` for no-PR repos |
+| [mcp](mcp/) | every machine | MCP servers without per-machine logins: keys global, definitions per project, trust per machine |
+| [t3-remote](t3-remote/) | workers, controllers | T3 Code as a service, phone access, controller and worker linked to each other |
+| [cliproxy](cliproxy/) | worker + controller | one CLIProxyAPI hub for every Claude and Codex account, failover, request log archive |
+| [mac-automations](mac-automations/) | macOS | every scheduled job through one signed runner granted Full Disk Access once |
+| [linux-automations](linux-automations/) | Linux workers | one systemd user timer per job, `Persistent=true` where downtime matters |
+| [agent-history-backup](agent-history-backup/) | every machine | every agent conversation kept forever in restic on S3, with a restore helper |
+| [dev-server](dev-server/) | workers | run a web app on the worker, open it over tailnet HTTPS from anywhere, reaped after 24h |
+| [postdraft](postdraft/) | every machine | agents publish plans, reports and files as links, on your own Convex server (npm) |
+| [halo](halo/) | controller + headless worker | see and click a worker's screen from the controller: Xvfb, voxl, RustDesk, a screen pool (npm) |
+| [sill](sill/) | macOS + phone | any window on your Mac on your iPhone or iPad, over Tailscale, kept running |
 | [worker-chrome](worker-chrome/) | workers | one real, logged-in Chrome that agents drive instead of headless Chromium (npm) |
-| [peekaboo](peekaboo/) | macOS | let an agent see and click the real screen |
+| [cua-driver](cua-driver/) | macOS controllers | agents drive native apps in the background, CLI and MCP (trycua) |
+| [peekaboo](peekaboo/) | macOS | let an agent see and click the real screen, fallback for cua-driver |
+| [phoneuse](phoneuse/) | headless worker + phone | agents see and tap a real iPhone over AirPlay and Bluetooth (spec) |
 | [vorssaint](vorssaint/) | macOS controllers | free menu bar toolkit, from the release or your own fork's build |
-| [mcp](mcp/) | every machine | MCP servers that work on every machine without per-machine logins |
 | [os-update](os-update/) | workers | OS upgrades as reboot-safe work orders |

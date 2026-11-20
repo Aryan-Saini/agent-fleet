@@ -4,6 +4,7 @@ description: Capture screenshots or record browser video on a headless worker, d
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [linux]
+  scope: worker
   requires: "the drop folder, playwright-core and its Chromium in ~/.local/share/fleet-browser (install below), ffmpeg for video conversion, gh when attaching to a PR"
 ---
 

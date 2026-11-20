@@ -4,7 +4,8 @@ description: REQUIRED before touching a browser or the screen by any means. Cove
 metadata:
   harness: [claude]
   platform: [darwin]
-  requires: 'osascript for the browser path; the Codex CLI, a running ChatGPT.app, and its Computer Use plugin for GUI work; peekaboo (packages/peekaboo) as the fallback'
+  scope: controller
+  requires: "osascript for the browser path; Cua Driver (CuaDriver.app plus the cua-driver CLI, see the cua-driver skill) for everything else; peekaboo (packages/peekaboo) as an optional fallback"
 ---
 
 # Control computer
@@ -17,39 +18,31 @@ CLI call takes seconds and returns a real exit code.
 | --- | --- |
 | Test results, build output, logs | **bash** |
 | System state: processes, disk, files, network | **bash** |
-| Anything with a CLI or API | **that CLI.** `gh`, `aws`, a cloud provider's CLI, all beat clicking |
+| Anything with a CLI or API | **that CLI.** `gh`, a cloud provider's CLI, all beat clicking |
 | Anything another skill already owns | **that skill.** Several wrap a real binary or API and have solved the GUI problem already |
 | A public web page's content | **`curl`** or `WebFetch` |
+| Your own app inside T3 Code: load a dev server or preview URL, click through, screenshot, console | **T3's `preview_*` tools.** Headless, built in |
+| Your own app in iOS Simulator or Android Emulator, inside T3 Code | **T3's `device_*` tools**, then the `agent-device` command `device_open` returns |
 | Read a tab the user already has open: title, URL, `document.body.innerText` | **osascript**, below |
 | Run a one-off JS expression and read the result | **osascript** |
 | A site the user is logged into | **a browser**. The session is the point |
-| Click, type, log in, or complete a flow in a browser | **Codex** |
-| Anything in a native app: Finder, Xcode, Simulator, System Settings, Mail | **Codex, always** |
-| Anything with a screenshot as the deliverable | **Codex** |
+| Click, type, log in, or complete a flow in a browser | **Cua Driver** |
+| Anything in a native app: Xcode, System Settings, Mail, Numbers | **Cua Driver** |
+| Anything with a screenshot as the deliverable | **Cua Driver** (`--screenshot-out-file`) |
 
-The rule in one line: **script it if you can, osascript to read, Codex to do, and applications
-are always Codex.**
-
-**Peekaboo instead of Codex** in two cases: the user says "peekaboo", or Codex is out of usage
-(`cu_run` fails, or its report says the usage or rate limit was hit). Peekaboo is a CLI Claude
-drives from bash with real mouse and keyboard events. How to use it, and the traps:
-**[references/peekaboo.md](references/peekaboo.md)**.
-
-**Before using Computer Use, check whether basic bash commands such as `open`, `cd`, or `ls`
-can complete the task. If they can, use them. Only use Computer Use when the task genuinely
-requires seeing or interacting with the GUI.**
+The rule in one line: **script it if you can, osascript to read, Cua Driver to do.** File moves
+and renames are `mv`, never Finder.
 
 Reach for the screen only when the answer genuinely lives there: the page is client-rendered,
-the app has no scripting interface, the check needs real layout, or the user asks to *see* something.
-
-Use the `chrome-devtools` or `playwright` MCPs only when the user names them: they drive a separate browser, not the session the user is logged into.
+the app has no scripting interface, the check needs real layout, or the user asks to *see*
+something. Use the `chrome-devtools` or `playwright` MCPs only when the user names them: they
+drive a separate browser, not the session the user is logged into.
 
 ## Reading a browser
 
 Chrome, Brave and any other Chromium browser share one osascript interface, so swap the
-application name and everything else is identical.
-
-Enumerate before you act. Never open a window or tab.
+application name and everything else is identical. Enumerate before you act. Never open a window
+or tab to read.
 
 ```bash
 osascript -e 'tell application "Google Chrome"
@@ -67,19 +60,14 @@ osascript -e 'tell application "Google Chrome"
 end tell'
 ```
 
-That prints `window:tab` indices. Use them to read any tab without focusing it:
+That prints `window:tab` indices. Read any tab without focusing it:
 
 ```bash
 osascript -e 'tell application "Google Chrome" to execute (tab 3 of window 2) javascript "document.title"'
-```
-
-The front tab, when that is clearly the one they mean:
-
-```bash
 osascript -e 'tell application "Google Chrome" to execute front window'\''s active tab javascript "document.body.innerText"'
 ```
 
-Bring a tab forward, only when the user asked you to show them something:
+Bring a tab forward only when the user asked you to show them something:
 
 ```bash
 osascript -e 'tell application "Google Chrome"
@@ -89,202 +77,140 @@ osascript -e 'tell application "Google Chrome"
 end tell'
 ```
 
-If no open tab matches what the user is referring to, ask which one. Do not guess and do not open
-anything.
+If no open tab matches what the user means, ask which one. Do not guess and do not open anything.
 
-**Stop here and switch to Codex the moment the task needs a click.** `execute javascript` can
-fake one, but it bypasses the real event path, so a passing result proves nothing about what a
-person would experience.
+**Switch to Cua Driver the moment the task needs a click.** `execute javascript` can fake one,
+but it bypasses the real event path, so a passing result proves nothing about what a person
+would experience.
 
-## Codex Computer Use
+## Cua Driver
 
-Everything else. Codex drives the real screen through the `cua` runtime (the `cua_repl` MCP
-server's `js` tool), so it works on any app, not just browsers.
+[Cua Driver](https://github.com/trycua/cua) (by trycua) drives apps **in the background**: it
+acts on a target pid through Accessibility, so the user keeps the keyboard, mouse and focus while
+it works, and several runs can go at once. Drive it yourself, from bash (`cua-driver call <tool>
+'<json>'`) or through its MCP server (`cua-driver mcp`, same tools). No delegation. Install and
+the upstream skill: the **cua-driver** skill.
 
-This interface is versioned and it moves. The older `computer-use:computer-use` skill with
-`node_repl` + `@oai/sky` is gone: that plugin now ships an empty `skills/` directory, so a
-prompt naming it gets an honest BLOCKED. If a run comes back BLOCKED on a missing capability,
-read the current contract in
-`~/.codex/plugins/cache/openai-bundled/unified-computer-use/*/resources/js-tool-description.md`
-and `.mcp.json` beside it, then update the routing block below to match.
+The author benchmarked it against Peekaboo and Codex Computer Use on the same Mac: same or better
+pass rate, 3 to 7 times faster, and no focus steals on everything it could do in the background.
 
-The rename is API-level only. Underneath, the same Sky service still drives the screen, so
-every path and process name here (`SkyComputerUseService`, `node_repl`, the `CU_SKYCLIENT`
-teardown) is current, verified against a live run.
+### The loop
 
-Paste the helpers once per session, then a run is three calls.
+Snapshot, act by element token, verify at checkpoints.
 
 ```bash
-# --- control-computer helpers ---
-cu_ready(){ pgrep -x ChatGPT >/dev/null || { open -ga "ChatGPT"; sleep 3; }; }
-cu_new(){ export CU_ART="$(mktemp -d "${TMPDIR:-/tmp}/codex-cu.XXXXXX")"; echo "$CU_ART"; }
-cu_run(){ codex exec -C "$PWD" --skip-git-repo-check --add-dir "$CU_ART" -c model_reasoning_effort=low \
-            -s danger-full-access -o "$CU_ART/report.md" "$(cat "$CU_ART/prompt.md")" </dev/null; \
-          cat "$CU_ART/report.md"; }
-CU_SKYCLIENT="$HOME/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+cua-driver call list_apps                                    # running apps + pids
+cua-driver call list_windows '{"pid":844}'                   # window ids
+cua-driver call get_window_state '{"pid":844,"window_id":10725}' --screenshot-out-file "$TMPDIR/s.png"
+cua-driver call get_window_state '{"pid":844,"window_id":10725,"query":"Next week"}'   # filter the AX tree
+cua-driver call run_steps '{"steps":[{"tool":"click","args":{"pid":844,"window_id":10725,"element_token":"s0000002a:12"}}],"observe":{}}'
+cua-driver call verify_state '{"pid":844,"window_id":10725,"expect":[{"element":{"selector":{"label_contains":"Saved"},"exists":true}}]}'
 ```
 
-```bash
-cu_ready                # ChatGPT.app must be running; starts it without stealing focus
-cu_new                 # prints $CU_ART; write your prompt to $CU_ART/prompt.md
-cu_run                 # one shot, prints the report
-```
+- **Read narrowly.** `get_window_state` with a `query` returns the matching part of the AX tree.
+  Re-read with `since:"latest"` to get only what changed. Read the screenshot file when layout
+  matters.
+- **Act on element tokens, not coordinates.** Row `[N]` in a snapshot is `<snapshot_id>:N`.
+  Tokens go stale once the window changes, so re-read before acting again. Pixels only for
+  surfaces missing from the tree.
+- **Batch through `run_steps`**, even for one step. It stops at the first failure and returns what
+  changed. Loops, branches or retries go in one `run_script` call.
+- **Verify at checkpoints** with `verify_state`. `unknown` and `effect:"unverifiable"` are not
+  success.
+- `set_value` / `type_text` fill fields, `invoke_menu` runs a menu path (`["Edit","Copy"]`),
+  `launch_app` opens an app without focusing it, `set_window_frame` sets exact geometry.
+- `cua-driver call get_guide '{"topic":"overview"}'` (also `browser`, `menus`, `batching`, `drag`,
+  `permissions`) is the driver's own manual. `cua-driver list-tools` lists every tool.
 
-Low reasoning effort is the default. `-s danger-full-access` is required for GUI work; drop to
-`-s workspace-write` for a non-GUI check.
+### Browser pages
 
-### The routing block
-
-Paste this at the top of every prompt, unchanged. Without it Codex quietly routes to its
-Browser or Chrome skill and you get a different, worse thing.
-
-```text
-Use Computer Use for every GUI interaction, driven through the persistent `js` tool of the `cua_repl` MCP server (the `cua` API). The session is persistent across calls; `js_reset` clears it.
-
-Your FIRST `js` call must be exactly one API call and nothing else. No extra calls, waits, or snapshots. Use `await cua.getApp("<App Name>")` when the task names an app, or `await cua.getState()` for an inventory of every app, browser, and tab. That first result returns the live API documentation. READ IT before continuing, and use only APIs it describes.
-
-Do NOT use the Browser skill, Chrome skill, browser-client runtime, Playwright, Selenium, AppleScript, osascript, JXA, System Events, or shell-based GUI automation.
-
-After every UI action or short action sequence, re-read state before deciding what to do next, and re-derive element references from that fresh state rather than reusing stale ones.
-
-If the `js` tool or the `cua` API is unavailable, return BLOCKED and identify the missing capability. Do not silently substitute another automation mechanism.
-```
-
-Never write "whatever method is available" or list alternative automation tools. That phrasing
-is exactly what lets Codex route away from Computer Use.
-
-### What else the prompt needs
-
-Name the app by display name or bundle identifier. Give the exact flow, the repo path, launch
-commands or test credentials, where to write screenshots, and ask for pass / fail / blocked
-plus the steps performed. Default to no source edits. Write it so Codex never needs this
-conversation.
-
-For a browser task, tell it to **enumerate every open browser and its tabs first** and reuse a
-tab that already has the site open and logged in. Opening a new browser is a last resort.
-
-Tell it to record what was already open before it starts, and to close only its own additions
-before it finishes.
-
-### Only if you are opening a new browser or tab
-
-Reusing something already open is always the answer when it exists. Only when nothing open has
-what you need, open a new window in the profile the task belongs to, named by its directory
-(`--profile-directory="Profile 1"`), not by its display name, which users rename. If the right
-profile is not obvious, ask.
+Chromium pages have typed tools: `get_browser_state`, then `browser_click`, `browser_type`,
+`browser_pointer` (hover, drag), `browser_navigate`. They attach over CDP, which needs the daemon
+started with consent to use existing browser profiles (`--grant existing-profile`, then a
+`browser_prepare` approval; a refusal's `detail.next_call` names the exact call). That consent exposes every logged-in
+profile, so the author leaves it off and drives browsers through the AX tree like any app; that
+passed every non-upload browser task in the benchmark. Turn it on only if you accept that trade.
+When a browser tool refuses with a consent error, fall back to the AX tree rather than granting.
 
 ### Preflight
 
-Two things kill a run before it starts, and both fail the same opaque way.
-
-**ChatGPT.app must be running.** Computer Use is driven by the Sky service, which is signed in
-through ChatGPT.app. Quit it and every `cua` call dies exactly like a locked screen does, with
-no hint that auth is the cause. `cu_ready` handles this; check by hand if you skipped it:
-
 ```bash
-pgrep -x ChatGPT >/dev/null && echo running || open -ga "ChatGPT"
+cua-driver status                  # "daemon is running"; if not: open -ga CuaDriver
+cua-driver permissions status      # Accessibility + Screen Recording must say granted
 ```
 
-Leave it running when the run ends. It is not something a run "opened". See below.
-
-**The screen must be unlocked.**
-
-A locked screen is the top cause of a dead GUI run: every state call times
-out with `Computer Use server error -10005: timeoutReached`, on every app, no matter how
-you name it. Check before launching, and check again if you see that error:
+`permissions_pending` or `unknown` with grants already given means the daemon started before the
+grant: `cua-driver stop`, then `cua-driver permissions grant`. Ask the user before approving any
+permission prompt. A locked screen kills captures too:
 
 ```bash
 ioreg -n Root -d1 -a | plutil -extract IOConsoleUsers json -o - - | grep -o '"CGSSessionScreenIsLocked":[a-z]*'
 ```
 
-No output means unlocked. `true` means locked. Do not start (or retry) a GUI run.
-`caffeinate -u` wakes the display but cannot unlock it; only the user can. Say the
-screen is locked and wait.
+`true` means locked. Only the user can unlock it; say so and wait.
 
-### If captures come back empty mid-session
+### Background only, unless the user is away
 
-A different failure from the lock-screen timeout: `get_app_state` succeeds but returns
-**no accessibility content and no screenshot** for an app that captured fine minutes
-earlier. The Sky service is wedged. Fix from bash, then retry the run:
+Every action defaults to background delivery. Some things refuse it, and Cua then offers
+`"delivery_mode":"foreground"` or `bring_to_front`. **Foreground input takes over the user's
+screen**: keystrokes land in whatever they are typing in. Use it only when they asked, or when
+they are away (`ioreg -c IOHIDSystem | awk -F'= ' '/HIDIdleTime/{print $2/1e9; exit}'` above
+~120 s). Otherwise stop and say which step needs the foreground.
 
-```bash
-pkill -f SkyComputerUseService
-```
+Known to need the foreground: **native file pickers** (any upload) and **Finder renames and
+moves** (use `mv` instead).
 
-It relaunches on demand and the next capture works.
+### Traps
 
-### Two rules that bite
+- **The clipboard is the user's.** Copy steps (`hotkey cmd+c`, `invoke_menu Edit > Copy`) can
+  silently fail in the background, and the next paste then uses whatever the user had copied. In
+  the benchmark that moved one of the author's real files. Before any paste, set the clipboard
+  yourself with `clipboard_write` and check it with `clipboard_read`.
+- **Autocorrect in Numbers, Pages and TextEdit** rewrites typed text. Read the cell back after
+  typing; prefer `set_value` over typed keys.
+- **Memory.** The daemon idles around 600 MB and has spiked to 8 GB on file-picker tasks.
+- **Telemetry.** Check `~/.cua-driver/config.json` and turn telemetry off if you don't want it.
 
-**One GUI run at a time.** Several Codex sessions can run in parallel, but there is one screen,
-one mouse, one keyboard, and parallel GUI runs fight over focus. Non-GUI Codex runs are fine
-alongside a single Computer Use run.
+### Parallel runs
 
-**Always tear the session down when `cu_run` returns.** This runs on every path out of a run,
-a clean pass, a failure, a BLOCKED report, an abandoned attempt. Signal the turn ended, then kill
-the session. Otherwise the
-translucent Sky cursor sits on screen and the service plus its `node_repl` children stay
-resident, holding accessibility state that makes the next run flaky:
-
-```bash
-"$CU_SKYCLIENT" turn-ended '{"type":"agent-turn-complete"}' 2>/dev/null
-pkill -f SkyComputerUseService
-pkill -f "cua_node/bin/node_repl"
-```
-
-Both relaunch on demand, so killing them costs nothing and the next `cu_run` starts clean.
-Confirm nothing is left behind:
-
-```bash
-ps axo pid,etime,command | grep -E "SkyComputerUseService|node_repl" | grep -v grep
-```
-
-The one time to hold off: another Codex GUI session is genuinely mid-run. These processes are
-shared, so check `etime` against your own run before killing. A much younger process than
-yours belongs to someone else.
+Background runs on different apps or windows can go in parallel (a browser booking and a
+spreadsheet edit at once, no interference). Two runs must never drive the same window.
+Foreground steps are one at a time.
 
 ### Close what you opened
 
-Leave the screen the way you found it. A browser window, a tab, a Terminal, a Simulator,
-System Settings, anything a run opened only to read or screenshot, gets closed before you
-report. If the run launched the app itself and it had no windows before, quit the app too.
+Leave the screen the way you found it. A browser window, a tab, a Terminal, a Simulator, System
+Settings, anything a run opened only to read or screenshot, gets closed before you report. If the
+run launched the app and it had no windows before, quit the app too.
 
-Four things stay open:
+Three things stay open: anything **already there** before the run (never close it or the window
+holding it), anything **the user asked to see** (say so in the report), and anything **another run
+is using**. Enumerate windows (`list_windows`) and tabs before you open anything; that list is how
+you know at the end which ones were yours. Navigation is not opening: a tab the user already had
+open stays where you left it.
 
-- **ChatGPT.app.** Computer Use needs it. Never quit it in teardown, even if your run started it.
-- **It was already there.** You reused a tab or a window that existed before the run. Never
-  close it, and never close the window holding it.
-- **The user asked to see it.** Anything opened so the user can look at it stays up. Say so in the report.
-- **Another GUI run is using it.** Check before closing, same as the process teardown.
+### Only if you are opening a new browser or tab
 
-This is why you enumerate windows and tabs before you open anything. That list is how you know
-at the end which ones were yours.
+Reusing something already open is always the answer when it exists. Otherwise open a window in
+the profile the task belongs to, named by its directory, not its display name (which users
+rename). `-g` keeps it in the background:
 
-Navigation is not opening. If you drove a tab the user already had open somewhere else, leave it
-where it is. Do not try to restore the old URL and lose their place.
+```bash
+open -gna "Google Chrome" --args --profile-directory="<Profile N>" "https://example.com"
+```
+
+If the right profile is not obvious, ask. Never start a second instance of a browser the user
+already runs (`open -n` on Firefox-family browsers, a new `-P` profile): it gets its own Dock icon
+and hides their real one.
 
 ### If you need a terminal
 
-Terminal.app refuses to close a window while a process is still running in it, silently, so let
+Use Terminal.app. It refuses to close a window while a process is still running, silently, so let
 the command finish before closing.
 
-## When a run needs a live confirmation
+## Alternative: Peekaboo
 
-Computer Use raises a confirmation immediately before a consequential action, creating a key,
-deleting data, sending a message, changing a setting. `codex exec` is one shot and cannot answer
-it, so that run stalls.
-
-Usually you can remove the gate rather than answer it. The per-app "Allow Computer Use to use
-&lt;App&gt;?" prompt is the only hard one: run it interactively once, choose **Always allow**
-(`Down Down Enter`), and every later run on that app is headless. The model's own "shall I go ahead?" pause is just caution, so pre-authorize it in the prompt:
-
-```text
-You are fully pre-authorized by the user for THIS exact action (<name it>).
-Do NOT ask for confirmation or a go-ahead. Perform it and print the result.
-```
-
-With both in place a consequential run completes under plain `cu_run`.
-
-If a hard gate still fires every time, drive a live session instead of handing the user a command.
-That is **[references/interactive.md](references/interactive.md)**: the tmux helpers, the
-background watcher that avoids token-burning polling, the auto-forward guardrails, and how to
-clear a ghost cursor left by an abrupt exit.
+[Peekaboo](https://github.com/steipete/Peekaboo) drives the real screen with real mouse and
+keyboard events. It steals focus, so it is a fallback: when Cua Driver is not installed, or the
+user says "peekaboo". How to use it and its traps:
+**[references/peekaboo.md](references/peekaboo.md)**. Install: `packages/peekaboo`.

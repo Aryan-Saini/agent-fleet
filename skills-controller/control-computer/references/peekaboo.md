@@ -1,19 +1,19 @@
 # Peekaboo
 
-Peekaboo is the second way to drive the screen. It's a macOS CLI that sees the screen and
-clicks, types and presses keys. Claude runs it straight from bash, with no Codex and no
-ChatGPT.app, so it still works when Codex is out of usage.
+Peekaboo is the fallback way to drive the screen. It's a macOS CLI that sees the screen and
+clicks, types and presses keys with real input events. Claude runs it straight from bash.
 
 ## When to use it
 
-- **The user says "peekaboo".** Use it, even if Codex is available.
-- **Codex is out of usage.** `cu_run` fails, or its report says the usage or rate limit was
-  hit. Switch to Peekaboo for the rest of the task rather than waiting.
-- Otherwise, Codex stays the default for GUI work. Peekaboo puts every step on Claude: find
-  the element, work out the coordinates, click, check. Codex does that loop itself.
+- **The user says "peekaboo".** Use it, even if Cua Driver is available.
+- **Cua Driver is not installed or not working** (daemon won't start, permissions can't be
+  granted right now).
+- Otherwise, Cua Driver stays the default. Peekaboo moves the real cursor and takes focus, so
+  the user can't work while it runs, and every step is on you: find the element, work out the
+  coordinates, click, check.
 
-Everything else in SKILL.md still applies: bash before the GUI, osascript to read a
-browser, one GUI run at a time, and close what you opened.
+Everything else in SKILL.md still applies: bash before the GUI, osascript to read a browser,
+one foreground GUI run at a time, and close what you opened.
 
 ## Setup
 

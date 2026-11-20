@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh the keyless global MCP servers (chrome-devtools, playwright)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/mcp-update

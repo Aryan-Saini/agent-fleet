@@ -1,0 +1,176 @@
+#!/usr/bin/env -S python3 -I
+"""hub: point this machine's Claude Code and Codex at the CLIProxyAPI hub on the worker, or away.
+
+  hub            same as `hub status`
+  hub status     which way this machine points, and whether the hub answers
+  hub off        the hub is down: use this machine's own logins directly
+  hub on         back through the hub (refuses if it does not answer; --force skips that)
+  hub tick       one automatic failover check; run it every minute from a scheduler
+
+Automatic failover: 3 failed checks in a row switch off the hub, 2 good ones switch back, each
+with a desktop notification. It only switches back what it switched off itself: a manual
+`hub off` stays off until a manual `hub on`. State: ~/.local/state/hub-failover.json.
+
+Settings (environment):
+  CLIPROXY_URL          the hub, e.g. https://<worker>.<tailnet>.ts.net:8317 (required)
+  CLIPROXY_KEY_FILE     file holding the client access key (default ~/.config/cliproxy/access-key)
+  HUB_CLAUDE_SETTINGS   default ~/.claude/settings.json
+  HUB_CODEX_CONFIG      default ~/.codex/config.toml
+
+What it edits, backing each file up to *.bak-hub first:
+  Claude  env.ANTHROPIC_BASE_URL and apiKeyHelper in settings.json
+  Codex   the `model_provider = "cliproxy"` line in config.toml, commented out when off.
+          The [model_providers.cliproxy] block itself stays; see packages/cliproxy/README.md.
+Running sessions keep their old setting. Start new ones.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HOME = os.path.expanduser("~")
+CLAUDE = os.environ.get("HUB_CLAUDE_SETTINGS", f"{HOME}/.claude/settings.json")
+CODEX = os.environ.get("HUB_CODEX_CONFIG", f"{HOME}/.codex/config.toml")
+KEY_FILE = os.environ.get("CLIPROXY_KEY_FILE", f"{HOME}/.config/cliproxy/access-key")
+HUB_URL = os.environ.get("CLIPROXY_URL", "").rstrip("/")
+PROBE_URL = os.environ.get("HUB_PROBE_URL", HUB_URL)  # tests point this at a dead address
+HELPER = f"cat {KEY_FILE}"
+CODEX_ON = 'model_provider = "cliproxy"'
+CODEX_OFF = '# hub off: model_provider = "cliproxy"'
+STATE = os.environ.get("HUB_STATE", f"{HOME}/.local/state/hub-failover.json")
+FAILS_TO_OFF, OKS_TO_ON = 3, 2
+
+
+def load_state():
+    try:
+        return json.load(open(STATE))
+    except (OSError, ValueError):
+        return {"fails": 0, "oks": 0, "auto_off": False}
+
+
+def save_state(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        json.dump(st, f)
+
+
+def notify(msg):
+    if sys.platform == "darwin":
+        subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "hub"'],
+                       capture_output=True)
+    elif shutil.which("notify-send"):
+        subprocess.run(["notify-send", "hub", msg], capture_output=True)
+
+
+def hub_answers():
+    try:
+        key = open(KEY_FILE).read().strip()
+    except OSError:
+        return False
+    # The key goes to curl on stdin, never in argv where `ps` would show it.
+    p = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "5", "-H", "@-",
+                        f"{PROBE_URL}/v1/models"], input=f"Authorization: Bearer {key}\n",
+                       capture_output=True, text=True)
+    return p.stdout.strip() == "200"
+
+
+def write(path, text):
+    """Back up once per change, then replace atomically, keeping the file's mode."""
+    mode = os.stat(path).st_mode & 0o777
+    shutil.copyfile(path, path + ".bak-hub")
+    os.chmod(path + ".bak-hub", mode)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def state():
+    """('on'|'off'|'mixed', claude_on, codex_on)."""
+    settings = json.load(open(CLAUDE))
+    claude_on = (settings.get("env") or {}).get("ANTHROPIC_BASE_URL") == HUB_URL
+    lines = open(CODEX).read().splitlines()
+    codex_on = CODEX_ON in lines
+    if not codex_on and CODEX_OFF not in lines:
+        sys.exit(f"hub: no `{CODEX_ON}` line in {CODEX}; add the hub provider first (see the README)")
+    mode = "on" if claude_on and codex_on else "off" if not (claude_on or codex_on) else "mixed"
+    return mode, claude_on, codex_on
+
+
+def set_mode(on):
+    settings = json.load(open(CLAUDE))
+    env = settings.setdefault("env", {})
+    if on:
+        env["ANTHROPIC_BASE_URL"] = HUB_URL
+        settings["apiKeyHelper"] = HELPER
+    else:
+        env.pop("ANTHROPIC_BASE_URL", None)
+        settings.pop("apiKeyHelper", None)
+        if not env:
+            settings.pop("env")
+    write(CLAUDE, json.dumps(settings, indent=2) + "\n")
+
+    old, new = (CODEX_OFF, CODEX_ON) if on else (CODEX_ON, CODEX_OFF)
+    lines = open(CODEX).read().split("\n")
+    if old in lines:
+        write(CODEX, "\n".join(new if line == old else line for line in lines))
+
+
+def tick():
+    """One failover check. Switches only on a streak, so a hub restart or a blip does nothing."""
+    mode, _, _ = state()
+    st = load_state()
+    ok = hub_answers()
+    if mode == "on":
+        st.update(fails=0 if ok else st["fails"] + 1, oks=0)
+        if st["fails"] >= FAILS_TO_OFF:
+            set_mode(False)
+            st.update(fails=0, auto_off=True)
+            notify("The hub is down. Switched to this machine's own logins (no call logging).")
+            print("hub down: switched off")
+    elif mode == "off" and st.get("auto_off"):
+        st.update(oks=st["oks"] + 1 if ok else 0, fails=0)
+        if st["oks"] >= OKS_TO_ON:
+            set_mode(True)
+            st.update(oks=0, auto_off=False)
+            notify("The hub is back. New sessions go through it again.")
+            print("hub back: switched on")
+    # Off by hand, or mixed: leave it to the human.
+    save_state(st)
+
+
+def main(argv):
+    if not HUB_URL:
+        sys.exit("hub: set CLIPROXY_URL to the hub, e.g. https://<worker>.<tailnet>.ts.net:8317")
+    cmd = argv[0] if argv else "status"
+    if cmd == "status":
+        mode, claude_on, codex_on = state()
+        where = {"on": "the hub", "off": "own logins (hub off)"}.get(mode, "MIXED")
+        print(f"points at: {where}  (claude {'hub' if claude_on else 'direct'}, "
+              f"codex {'hub' if codex_on else 'direct'})")
+        print(f"hub: {'answering' if hub_answers() else 'NOT answering'}")
+        if mode == "off":
+            print("switched off " + ("automatically; switches back on its own" if load_state().get("auto_off")
+                                     else "by hand; stays off until `hub on`"))
+    elif cmd == "tick":
+        tick()
+    elif cmd == "off":
+        set_mode(False)
+        save_state({"fails": 0, "oks": 0, "auto_off": False})
+        print("hub off: new Claude Code and Codex sessions use this machine's own logins.\n"
+              "No call logging and no account fallback until `hub on`. Restart running sessions.")
+    elif cmd == "on":
+        if "--force" not in argv and not hub_answers():
+            sys.exit("hub: the hub is not answering; staying off (hub on --force to switch anyway)")
+        set_mode(True)
+        save_state({"fails": 0, "oks": 0, "auto_off": False})
+        print("hub on: new Claude Code and Codex sessions go through the hub. Restart running sessions.")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

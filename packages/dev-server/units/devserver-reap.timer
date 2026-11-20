@@ -1,0 +1,10 @@
+[Unit]
+Description=Run devserver-reap every hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,17 +1,19 @@
 ---
 name: automation
-description: When the user wants something to run automatically or on a schedule on one of their machines (a cron job, a timer, a nightly script, a watcher), use skill.
-disable-model-invocation: true
+description: All automations run through here. Use when creating, editing, moving, pausing, retiring or debugging anything that runs on a schedule on any of the user's machines (hourly or nightly jobs, background checks, watchers, recurring scripts, "run this every X", "automate this"), and BEFORE writing any LaunchAgent, cron entry, systemd timer or T3 scheduled task.
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [darwin, linux]
-  requires: "the fleet repo checkout; the target machine's scheduler"
+  scope: fleet
+  requires: "the fleet repo checkout; the rest depends on the target machine's scheduler"
 ---
 
 # Automation
 
-Every machine already has a way to run things on a schedule. Add to it. Never invent a second
-scheduler beside it.
+**All automations run through here.** Every machine already has exactly one way to run things on a
+schedule. Creating, editing or retiring a job means changing that system, never registering a
+new job beside it. Every job also gets a row in `automations/README.md`, the registry, in the same
+commit.
 
 ## 1. Pick the machine
 
@@ -23,13 +25,21 @@ Ask if it is not obvious. The answer changes everything downstream.
 | needs a GUI or a logged-in desktop session | the controller |
 | long-running, heavy, or must work while the laptop is shut | a worker |
 | watches a service, scrapes, or polls on its own cadence | a worker |
+| needs an exact wall-clock time the controller's dispatcher doesn't offer | a worker |
 
-## 2. Use that OS's native scheduler
+## 2. Read that machine's instructions, in full, before writing anything
+
+Keep one file per machine at `automations/<machine>/SPECIAL_AUTOMATION_INSTRUCTION.md`: the
+layout, how to add a job, how to prove it ran, and the traps specific to that box. The machines
+work completely differently (different mechanisms, not just different permissions), so never
+work from memory of the other one's setup.
+
+## 3. The native scheduler per OS
 
 | OS | mechanism | lives at |
 | --- | --- | --- |
 | Linux | one systemd **user** timer + oneshot service per job | `~/.config/systemd/user/<name>.{service,timer}` |
-| macOS | one LaunchAgent per job, or one dispatcher agent that runs every tool folder (below) | `~/Library/LaunchAgents/` |
+| macOS | one dispatcher LaunchAgent that runs every tool folder (below) | `automations/<controller>/tools/<name>/` |
 | Windows | Task Scheduler | `schtasks /create ...` |
 
 Linux, the house shape:
@@ -64,30 +74,41 @@ systemctl --user daemon-reload && systemctl --user enable --now <name>.timer
 
 Lingering must be on (`loginctl show-user $USER -p Linger`) or user timers stop at logout.
 
-macOS: a dispatcher pattern scales better than one agent per job when jobs need protected access.
-One LaunchAgent fires `run-all.sh` hourly; each job is a folder `tools/<name>/<name>.sh` with an
-optional `cadence` file. macOS grants privacy permissions to the *responsible process*, so if the
-dispatcher runs through one app you granted Full Disk Access, every tool inherits it and no new
-permission prompt ever appears. Test through launchd, not from an agent shell: the shell has a
-different responsible process and reports false denials.
+macOS, the dispatcher: two LaunchAgents fire `run-all.sh` (hourly, and every minute for frequent
+tools). Each job is a folder `tools/<name>/<name>.sh` with an optional `cadence` file (`hourly`,
+`every <N>m`; absent means daily). Adding a job is dropping a folder in. Never a new LaunchAgent,
+`crontab` or `launchctl submit`. The only standalone LaunchAgents are plumbing listed in the
+registry; don't add to that list without the user saying so.
 
-## 3. Rules on every OS
+Why one dispatcher: macOS grants privacy permissions to the *responsible process*. If the
+dispatcher runs through one small runner app you granted Full Disk Access, every tool inherits it
+and no new permission prompt ever appears. Test through launchd, not from an agent shell: the
+shell has a different responsible process and reports false denials.
 
+T3 Code scheduled tasks are a third kind: an agent run whose report the user reads in a thread
+(a nightly `/fleet-update`, for example). Add one only when the user asks for exactly that.
+
+## 4. Rules on every OS
+
+- Existing systems only. Never add a parallel scheduler.
 - Idempotent. It will run again whether or not the last run did anything.
 - Absolute paths. No shell profile, no useful working directory.
 - Exit non-zero on real failure, and call `fleet alert` when a human must act. Silence is the bug.
 - **No secrets in unit files or scripts.** `Environment=` lines get committed. Read secrets from
   `~/.config/agent-secrets.env` or similar, outside the repo.
 - Version the script and unit in the fleet repo under `automations/<machine>/`, because the live
-  copy in `~/.config` does not survive a rebuild. Logs are never committed.
-- Add a row to `automations/README.md` in the same commit: what, why, when, where, logs.
+  copy in `~/.config` does not survive a rebuild. Logs are never committed. If the fleet repo
+  uses a denylist `.gitignore`, check what you are adding rather than assuming it is excluded.
+- Add the registry row in the same commit: what, why, when, where, logs.
 
-## 4. Verify one real run before saying done
+## 5. Verify one real run before saying done
 
 ```bash
 systemctl --user start <name>.service && journalctl --user -u <name>.service -n 30 --no-pager
 systemctl --user list-timers | grep <name>
 ```
 
+On macOS, run the dispatcher through launchd for just that tool and read its log.
+
 Both platforms fail silently by default: Linux when a wall-clock timer's moment passes while the
-box is down, macOS when the job lacks a permission.
+box is down for a reboot (hence `Persistent=true`), macOS when the job lacks a permission.

@@ -4,6 +4,7 @@ description: File a concise pull request. Use when the user asks to file, open, 
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [darwin, linux]
+  scope: fleet
   requires: "gh, authenticated"
 ---
 
@@ -36,9 +37,11 @@ Rebase onto the latest base branch before opening. Stale branches conflict and w
 End the description with one line naming the model and harness that made the change, for example
 `Made with Claude Code (Opus) and reviewed by Codex.`
 
-Open a real PR rather than a draft; drafts usually get no review-bot coverage. Merge only when the
-user asked for it.
+Open a real PR rather than a draft. Drafts usually get no review-bot coverage. Inside T3 Code,
+link the PR to the thread with `link_pull_request` right after opening it, for every layer of a
+stack. Merge only when the user asked for it, and through whatever path your deploy needs (some
+hosts only deploy merges authored by a specific account).
 
 If the user wants screenshots or video in the PR, capture them (the `capture` skill on a
-headless worker), upload them somewhere public, and embed the URLs. Check every image for
-private data before it goes public.
+headless worker, `ui-stress-shots` for before/after UI shots), upload them somewhere public, and embed the URLs. Repo-relative image
+paths do not render in a PR body. Check every image for private data before it goes public.

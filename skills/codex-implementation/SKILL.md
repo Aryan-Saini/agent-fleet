@@ -1,10 +1,11 @@
 ---
 name: codex-implementation
-description: Ask the Codex CLI to implement scoped code changes in the current repository, then have Claude inspect the resulting diff and verification. Use when the user asks Claude to delegate implementation to Codex or to an OpenAI model, e.g. "have Codex build this", "delegate this to Codex", "have another agent produce a patch".
+description: Ask Codex (an OpenAI model such as GPT Sol) to implement scoped code changes in the current repository, then have Claude inspect the resulting diff and verification. This is how OpenAI models are invoked for implementation work. Use when the user asks Claude to delegate implementation to Codex or to an OpenAI model, e.g. "have Codex build this", "let Sol implement it", "delegate this to Codex", "have another agent produce a patch".
 metadata:
   harness: [claude]
   platform: [darwin, linux]
-  requires: "the Codex CLI on PATH"
+  scope: fleet
+  requires: "inside T3 Code: nothing. Outside it: the Codex CLI on PATH"
 ---
 
 # Codex Implementation
@@ -17,13 +18,14 @@ Use this when the user asks for Codex or delegation, or when a bounded task woul
 
 1. Pin the current state with `git status --short` and note any user changes already present.
 2. Define the implementation scope: files or behavior to change, files to avoid, constraints, and verification commands.
-3. Create a temporary artifact directory for Codex's report.
-4. Run `codex exec` with repo write access.
-5. After Codex exits, inspect `git status` and `git diff`.
-6. Run the cheapest reliable verification yourself when practical.
-7. Report what Codex changed, what Claude verified, and any remaining risks.
+3. Hand it to Codex: `delegate_task` inside T3 Code, `codex exec` outside it.
+4. When Codex finishes, inspect `git status` and `git diff`.
+5. Run the cheapest reliable verification yourself when practical.
+6. Report what Codex changed, what Claude verified, and any remaining risks.
 
-Use this command shape:
+Inside T3 Code, use `delegate_task` with `role: "implementation"` and the Codex target from the
+`subagents` skill. It edits this checkout like `codex exec` and wakes you when done. Outside T3,
+create a temporary artifact directory for Codex's report and use this command shape:
 
 ```bash
 ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-implementation.XXXXXX")"
@@ -40,7 +42,7 @@ codex exec \
   "$(cat "$PROMPT")"
 ```
 
-The model comes from `~/.codex/config.toml`. Low reasoning effort is usually enough for a well-scoped task; raise it with `-c model_reasoning_effort="medium"` when the task needs more judgment.
+The model comes from `~/.codex/config.toml` (the author's is GPT Sol). Low reasoning effort is usually enough for a well-scoped task; raise it with `-c model_reasoning_effort="medium"` when the task needs more judgment. Keep fast mode and the priority service tier off (see `subagents`).
 
 Use `-s workspace-write` by default. Use `-s danger-full-access` only when the implementation truly needs access outside the repo, app launch automation, simulator work, package manager global state, or other machine-level operations.
 

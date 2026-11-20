@@ -1,0 +1,11 @@
+[Unit]
+Description=Run cliproxy-log-archive daily
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+# A run missed while the worker was down fires on the next boot.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

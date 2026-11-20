@@ -4,8 +4,11 @@ description: Cut AI tells from any writing. Must always apply.
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [darwin, linux]
+  scope: fleet
   requires: "nothing to run. Pure prose rules, no scripts or credentials"
 ---
+
+> Derived from the `unslop` skill in Lauren Tan's [pstack](https://github.com/cursor/plugins/tree/main/pstack/skills/unslop), MIT licensed (see `LICENSE` in this folder), and expanded since.
 
 # Unslop
 
