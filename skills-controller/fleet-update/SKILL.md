@@ -5,6 +5,7 @@ disable-model-invocation: true
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [darwin, linux]
+  scope: controller
   requires: "ssh to every machine; the fleet repo checkout"
 ---
 
@@ -44,6 +45,27 @@ Your fleet is not the author's fleet. Everything this skill updates comes from t
    current plus one). Never anything with a live process (`pgrep` first), a pinned toolchain, the
    newest rollback snapshot, or a source checkout.
 8. **Not done until verified and recorded.**
+9. **Every update gets a danger check before it installs.** Supply-chain attacks land through
+   exactly this kind of nightly job.
+   - **npm releases, scripted.** Compare each pending release with the installed one before
+     installing: a GitHub advisory on the version is **BLOCK** (never install, report it); a new
+     install script, an unknown publisher or dropped provenance is **REVIEW** (read the changelog
+     and the flagged script; approve only if it is plainly the vendor's own release). Either one
+     holds the whole run.
+   - **Everything else, by reading.** Skim the upstream commits of any fork you rebase (anything
+     touching network calls, credentials, install or update scripts), casks you don't recognise
+     or whose download host changed, and the release notes of the agent CLIs and computer-use
+     tools for new telemetry or permission changes. When in doubt, hold the item and report it.
+   - Every report names what was checked and what was held.
+10. **Your own forks rebase without asking.** For tools you run from a fork (`my-changes` on top
+    of upstream): resolve conflicts, rebuild, `git push --force-with-lease` to your fork. Never
+    push to upstream. Report what was resolved.
+11. **Tools that see secrets or run as root get a leak guard.** A model-account hub sees every
+    prompt and holds every login; a phone-control daemon runs as root. Their updaters diff the
+    outbound hostnames hard-coded in upstream (and, for root code, the root-run files) between the
+    old and new version, and stop with exit 3 (REVIEW) on anything new. Approve only when each new
+    host is the provider's own endpoint or fetches public data without sending request content,
+    account data or tokens. Never approve a host because its name looks harmless.
 
 ## Normal flow
 
@@ -68,7 +90,57 @@ Your fleet is not the author's fleet. Everything this skill updates comes from t
 (`packages/os-update/<os>.sh`) one machine at a time, wait for its report in `~/drop` and the
 alert, then move to the next. The controller's own OS upgrade is the user's to run.
 
+## Sudo without a human
+
+Steps that need root run unattended, the nightly included, without the password ever reaching a
+repo, a log or a prompt:
+
+- **macOS:** `sudo -A` with `SUDO_ASKPASS` pointing at a tiny helper that reads the password from
+  a login Keychain item. Never echo it or pipe it through `sudo -S`. If the helper fails, the
+  password probably changed: report it.
+- **Linux worker:** passwordless sudo for the user, so `sudo -n` works in scripts.
+
+Sudo changes nothing about the safety rules: still nothing reboot-class, no `sudoers` edits.
+
+## One script, parallel lanes
+
+Put the deterministic part in a script (`fleet-update`, versioned in the repo) and keep the agent
+for judgment. The author's shape:
+
+```bash
+fleet-update --check      # versions vs available, queues, cleanup sizes, health
+fleet-update              # every lane in parallel, one summary, non-zero if any step failed
+fleet-update <machine>    # one lane
+fleet-update providers    # agent CLIs only, every machine
+```
+
+Within a lane, steps that share a lock or toolchain run in sequence (brew, then anything built
+with brew's toolchain); everything else runs alongside. Per-step logs go to a dated directory.
+Things the script must never touch stay with the agent: browsers, the app the agent runs in,
+reboot-class work, worktrees, toolchains, snapshots.
+
+Steps worth copying:
+
+- **Agent CLIs hourly.** T3 Code flags a provider update within the hour, so a nightly alone
+  leaves the fleet up to a day behind. An hourly `fleet-update providers` (through the
+  `automation` skill) updates `claude`, `codex` and `opencode` everywhere without restarting
+  anything: running sessions keep their CLI, new ones get the update. It skips while the nightly
+  holds its lock.
+- **Weekly T3 peers.** Environment links and MCP sign-ins between machines are 30-day tokens with
+  no refresh. A weekly step re-pairs each machine with the others (mint a pairing code over ssh,
+  relink over Tailscale, approve the MCP login) and records the last good run. A failure here means
+  a link is about to lapse.
+- **Tailscale last.** Relaunching the Tailscale app to apply an update drops the tailnet for a
+  moment, so it is the final step of the controller lane. A worker's Tailscale goes with `--deep`.
+
 ## Unattended runs
 
-A nightly scheduled run (headless agent on this skill) is fine and still bound by every rule
-above. It writes its report to the log dir and sends `fleet alert` with OK or NEEDS ATTENTION.
+A nightly scheduled run (a T3 Code scheduled task or a headless agent on this skill) is fine and
+still bound by every rule above. Nothing in it may quit the app it runs inside. It writes its
+report to the log dir and sends `fleet alert` with OK or NEEDS ATTENTION. Before a manual run,
+read the latest nightly report: most of the work may already be done.
+
+When the user ran `/fleet-update` alone in a T3 Code thread and the run was clean (no unresolved
+failure, no failed login probe), settle the thread as the last action
+(`t3_thread_organize` with `action: "settle"`). Anything else in the thread, or anything left for
+the user, leaves it open.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run agent-history-backup daily
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+# A run missed while the box was off or rebooting fires on the next boot.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

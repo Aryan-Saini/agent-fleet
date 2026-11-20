@@ -1,0 +1,13 @@
+# Example unit pair: copy to ~/.config/systemd/user/, keep a copy in your fleet repo under
+# automations/<worker>/units/, and add a row to the automations registry.
+[Unit]
+Description=Write the nightly report to ~/drop
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nightly-report
+# Background job: stay out of the way of interactive work.
+Nice=10
+IOSchedulingClass=idle

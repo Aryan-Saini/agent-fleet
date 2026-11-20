@@ -5,8 +5,11 @@ disable-model-invocation: true
 metadata:
   harness: [claude, codex, cursor, opencode]
   platform: [darwin, linux]
+  scope: fleet
   requires: "nothing to run. Pure prose rules, no scripts or credentials"
 ---
+
+> Derived from the `technical-writing` skill in Lauren Tan's [pstack](https://github.com/cursor/plugins/tree/main/pstack/skills/technical-writing), MIT licensed (see `LICENSE` in this folder), and expanded since.
 
 # Technical writing
 

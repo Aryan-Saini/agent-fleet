@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# agent-history-restore: find and pull files back out of the agent-history restic repo.
+#
+#   agent-history-restore ls [pattern]                    where a file appears, newest snapshot first
+#   agent-history-restore get <snapshot> <path> <dest-dir>
+#
+# ls: a pattern without glob characters is wrapped as *pattern*, so a session id or a file name
+# fragment works. Patterns match per path component; ** spans directories. No pattern lists the
+# snapshots (one per host per day).
+# get: <path> is the absolute path ls showed (a file or a directory). It is restored under
+# <dest-dir> with its full path, so nothing live is overwritten.
+#
+# Reads the same config as agent-history-backup: ~/.config/restic/agent-history.env and the
+# password file ~/.config/restic/agent-history.pass (mode 600).
+set -euo pipefail
+
+CONF="$HOME/.config/restic/agent-history.env"
+# shellcheck disable=SC1090
+[ -r "$CONF" ] && . "$CONF"
+export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:?set RESTIC_REPOSITORY in $CONF}"
+export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/agent-history.pass}"
+[ -n "${AWS_PROFILE:-}" ] && export AWS_PROFILE
+
+usage() { sed -n '4,5p' "$0" | sed 's/^# *//'; exit 2; }
+[ -r "$RESTIC_PASSWORD_FILE" ] || { echo "missing $RESTIC_PASSWORD_FILE (restore it from your off-machine copy, mode 600)" >&2; exit 1; }
+
+case "${1:-}" in
+  ls)
+    [ -n "${2:-}" ] || exec restic snapshots
+    pat="$2"
+    [[ "$pat" == *[\*\?\[]* ]] || pat="*$pat*"
+    exec restic find --long --human-readable "$pat"
+    ;;
+  get)
+    [ $# -eq 4 ] || usage
+    mkdir -p "$4"
+    exec restic restore "$2" --include "$3" --target "$4"
+    ;;
+  *) usage ;;
+esac

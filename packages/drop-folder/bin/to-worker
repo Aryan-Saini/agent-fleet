@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# to-worker: push files from the controller to the worker's ~/drop, now, over ssh.
+#
+#   to-worker report.md shot.png        -> <worker>:~/drop/
+#   to-worker -d ~/Downloads build.zip  -> <worker>:~/Downloads/
+#
+# The worker is FLEET_WORKER (an ssh alias, set in machine.env), default "worker". A thin wrapper
+# over `fleet send`, so it handles directories and binaries and fails with a hint when the worker
+# is unreachable.
+set -euo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=/dev/null
+. "$(dirname "$self")/../../../bin/fleet-lib.sh"
+exec fleet send "${FLEET_WORKER:-worker}" "$@"

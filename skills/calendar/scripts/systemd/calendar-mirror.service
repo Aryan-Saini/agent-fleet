@@ -1,0 +1,16 @@
+# Publishes your calendars to Google: opaque busy blocks to the shared availability calendar,
+# and a full-detail private copy. Reads iCloud and Google directly, so the controller can be
+# asleep. Install on the worker:
+#   cp systemd/calendar-mirror.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now calendar-mirror.timer
+[Unit]
+Description=Mirror calendars to the shared availability calendar
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Point this at wherever `fleet link` puts the skill.
+WorkingDirectory=%h/.agents/skills/calendar/scripts
+ExecStart=%h/.local/bin/uv run --quiet --script mirror.py sync
+TimeoutStartSec=300

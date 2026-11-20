@@ -1,0 +1,17 @@
+# The CLIProxyAPI hub as a systemd user service on the worker. Reference copy; adjust the paths.
+# Needs lingering (packages/always-on) so it starts at boot without a login.
+[Unit]
+Description=CLIProxyAPI hub (Claude and Codex accounts for the fleet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=WRITABLE_PATH=%h/cliproxyapi
+WorkingDirectory=%h/cliproxyapi
+# -local-model: use the bundled model list, never fetch a remote catalog.
+ExecStart=%h/cliproxyapi/cli-proxy-api -config %h/cliproxyapi/config.yaml -local-model
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Remove dev servers (worker-expose) added more than 24h ago, unless kept
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/worker-expose reap

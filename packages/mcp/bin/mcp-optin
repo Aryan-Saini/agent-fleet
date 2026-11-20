@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# mcp-optin: opt a project into shared keyed MCP servers, for Claude Code and Cursor.
+#
+#   mcp-optin [path] [--only a,b] [--no-peer]     path defaults to the current directory
+#
+# Writes, idempotently (no diff on a re-run):
+#   <repo>/.mcp.json               Claude Code definitions, "Bearer ${NAME_API_KEY}", never a key
+#   <repo>/.cursor/mcp.json        Cursor definitions, "${env:NAME_API_KEY}"
+#   <repo>/.claude/settings.json   enabledMcpjsonServers, so a fresh clone needs no approval edits
+#   ~/.claude.json                 trusts the project on this machine (machine state, not committed)
+# Commit the three repo files. Keys stay in ~/.config/agent-secrets.env (packages/mcp).
+#
+# --only sets the list exactly, in all four places, so re-running with a narrower list removes a
+# server from a repo that got too much.
+#
+# Trust is per machine, so with MCP_OPTIN_PEER=<ssh alias> set it also finds the same repo on the
+# peer, matched by normalized git remote (checkout paths and ssh/https remotes differ per
+# machine), and trusts it there. Asleep or unreachable peer: reported and skipped.
+#
+# Add a server: one entry in SERVERS below, and its key in agent-secrets.env on every machine.
+set -euo pipefail
+
+# name -> (url, key variable). Both are public services; swap in your own.
+SERVERS_JSON='{
+  "linear":  {"url": "https://mcp.linear.app/mcp",  "key": "LINEAR_API_KEY"},
+  "posthog": {"url": "https://mcp.posthog.com/mcp", "key": "POSTHOG_API_KEY"}
+}'
+
+PEER_SYNC=1
+ONLY=""
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-peer) PEER_SYNC=0; shift ;;
+    --only) ONLY="${2:?--only needs a server list}"; shift 2 ;;
+    --only=*) ONLY="${1#*=}"; shift ;;
+    -h|--help) sed -n '2,20s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+ALL=$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$SERVERS_JSON")
+MCP_SERVERS="${ONLY:-$ALL}"
+for s in ${MCP_SERVERS//,/ }; do
+  case ",$ALL," in *",$s,"*) ;; *) echo "mcp-optin: unknown server '$s' (have: $ALL)" >&2; exit 2 ;; esac
+done
+export MCP_SERVERS SERVERS_JSON
+
+# Physical path: Claude Code keys ~/.claude.json by the resolved path, so a logical path through
+# a symlink (macOS /tmp -> /private/tmp) writes an entry that is never read.
+R="$(cd "${ARGS[0]:-$PWD}" && pwd -P)"
+mkdir -p "$R/.cursor" "$R/.claude"
+
+python3 - "$R" <<'PY'
+import json, os, sys
+r = sys.argv[1]
+servers = json.loads(os.environ["SERVERS_JSON"])
+want = [s for s in os.environ["MCP_SERVERS"].split(",") if s]
+
+def write_if_changed(path, data):
+    if os.path.exists(path):
+        try:
+            if json.load(open(path)) == data:
+                return
+        except json.JSONDecodeError:
+            pass
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+claude = {"mcpServers": {n: {"type": "http", "url": servers[n]["url"],
+          "headers": {"Authorization": "Bearer ${%s}" % servers[n]["key"]}} for n in want}}
+cursor = {"mcpServers": {n: {"url": servers[n]["url"],
+          "headers": {"Authorization": "Bearer ${env:%s}" % servers[n]["key"]}} for n in want}}
+write_if_changed(os.path.join(r, ".mcp.json"), claude)
+write_if_changed(os.path.join(r, ".cursor", "mcp.json"), cursor)
+
+p = os.path.join(r, ".claude", "settings.json")
+d = json.load(open(p)) if os.path.exists(p) else {}
+d["enableAllProjectMcpServers"] = False
+d["enabledMcpjsonServers"] = sorted(want)
+write_if_changed(p, d)
+PY
+
+# Trust locally. Until hasTrustDialogAccepted is true, Claude Code strips enabledMcpjsonServers
+# on every run and the servers sit at "Pending approval".
+TRUST_PY='
+import json, os, sys
+r = sys.argv[1]
+p = os.path.expanduser("~/.claude.json")
+if not os.path.exists(p):
+    print("  no ~/.claude.json (run claude once), trust skipped"); raise SystemExit(0)
+d = json.load(open(p))
+proj = d.setdefault("projects", {}).setdefault(r, {})
+proj["hasTrustDialogAccepted"] = True
+proj["enabledMcpjsonServers"] = sorted(s for s in os.environ["MCP_SERVERS"].split(",") if s)
+proj["disabledMcpjsonServers"] = []
+json.dump(d, open(p, "w"), indent=2)
+'
+python3 -c "$TRUST_PY" "$R"
+echo "opted in: $R"
+echo "  servers: $MCP_SERVERS (keys from the environment, never written)"
+echo "  commit: .mcp.json .cursor/mcp.json .claude/settings.json"
+
+[ "$PEER_SYNC" -eq 1 ] && [ -n "${MCP_OPTIN_PEER:-}" ] || exit 0
+REMOTE="$(git -C "$R" remote get-url origin 2>/dev/null || true)"
+[ -n "$REMOTE" ] || { echo "  peer: skipped (no git remote to match on)"; exit 0; }
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$MCP_OPTIN_PEER" true 2>/dev/null; then
+  echo "  peer ($MCP_OPTIN_PEER): unreachable, skipped. Run mcp-optin there later."; exit 0
+fi
+
+# On the peer: find the checkout whose normalized remote matches, then trust it there.
+ssh "$MCP_OPTIN_PEER" "REMOTE='$REMOTE' MCP_SERVERS='$MCP_SERVERS' python3 -" <<'PY' || echo "  peer: failed, run mcp-optin there"
+import json, os, re, subprocess
+
+def norm(url):
+    u = re.sub(r"^[a-z+]+://", "", url.strip().lower())
+    u = re.sub(r"^[^@/]+@", "", u)
+    if "/" not in u.split(":", 1)[0]:
+        u = u.replace(":", "/", 1)
+    return re.sub(r"\.git$", "", u).strip("/")
+
+remote = norm(os.environ["REMOTE"])
+home = os.path.expanduser("~")
+match = None
+for root in (os.path.join(home, d) for d in ("dev", "code", "projects", "src", "repos", "Desktop")):
+    if not os.path.isdir(root):
+        continue
+    for dirpath, dirnames, _ in os.walk(root):
+        if dirpath[len(root):].count(os.sep) >= 3:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in ("node_modules", ".git")]
+        if os.path.isdir(os.path.join(dirpath, ".git")):
+            out = subprocess.run(["git", "-C", dirpath, "remote", "get-url", "origin"],
+                                 capture_output=True, text=True).stdout.strip()
+            if out and norm(out) == remote:
+                match = os.path.realpath(dirpath)
+                break
+    if match:
+        break
+if not match:
+    print("  peer: no checkout of", remote); raise SystemExit(0)
+p = os.path.join(home, ".claude.json")
+if not os.path.exists(p):
+    print("  peer: no ~/.claude.json"); raise SystemExit(0)
+d = json.load(open(p))
+proj = d.setdefault("projects", {}).setdefault(match, {})
+proj["hasTrustDialogAccepted"] = True
+proj["enabledMcpjsonServers"] = sorted(s for s in os.environ["MCP_SERVERS"].split(",") if s)
+proj["disabledMcpjsonServers"] = []
+json.dump(d, open(p, "w"), indent=2)
+print("  peer: trusted", match)
+PY

@@ -1,0 +1,146 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["caldav", "icalendar", "google-api-python-client", "google-auth", "tzdata"]
+# ///
+"""cal: read/write your calendars from the controller or a worker, backed by iCloud CalDAV and
+the Google API (calendars.py). Configured by ~/.config/calendar-mirror/config.json.
+
+    cal calendars
+    cal list   [--calendar <name> ...] --from YYYY-MM-DD --to YYYY-MM-DD
+    cal add    --calendar <name> --json <file|->      (events: title,date,start,end[,location,notes])
+    cal delete --id <id> [--id ...] [--dry-run]
+    cal delete --calendar <name> --from YYYY-MM-DD --to YYYY-MM-DD [--title <exact>] (--confirm | --dry-run)
+    cal move   --id <id> [--id ...] --calendar <name>
+
+Writes go to the configured iCloud calendars only; Google calendars are read-only by design. Unknown or abbreviated options are rejected, the two delete modes
+are exclusive, a range delete needs --confirm or --dry-run and only removes events that
+START inside the window, and nothing is deleted if any target is a recurring series.
+
+Output is JSON on stdout. Errors go to stderr: exit 1 usage or refused, 2 a calendar source
+failed (credentials, network, unshared calendar).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import sys
+
+import calendars as rc
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        sys.exit(f"cal: {message}")
+
+
+def emit(obj) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False))
+
+
+def day(value: str) -> dt.date:
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError:
+        sys.exit(f"cal: bad date {value} (want YYYY-MM-DD)")
+
+
+def load_events(src: str) -> list[dict]:
+    raw = sys.stdin.read() if src == "-" else open(src).read()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        sys.exit("cal: --json input is not valid JSON")
+    events = parsed["events"] if isinstance(parsed, dict) else parsed
+    if not events:
+        sys.exit("cal: --json contained no events")
+    return events
+
+
+def cmd_list(a):
+    events = rc.read(day(a.start), day(a.end), a.calendar)
+    emit({"count": len(events), "events": events})
+
+
+def cmd_add(a):
+    if a.calendar[0] not in rc.ICLOUD_CALENDARS:
+        raise rc.Refused(f"{a.calendar[0]!r} is not writable (writable: {', '.join(rc.ICLOUD_CALENDARS)})")
+    created = rc.add_icloud(a.calendar[0], load_events(a.json))
+    emit({"created": len(created), "events": created})
+
+
+def cmd_delete(a):
+    if a.id:
+        if a.calendar or a.start or a.end or a.title or a.confirm:
+            sys.exit("cal: choose ONE delete mode: --id, or a --calendar/--from/--to range")
+        targets = [{"id": i} for i in a.id]
+    else:
+        if not (a.calendar and a.start and a.end):
+            sys.exit("cal: range delete needs --calendar, --from and --to")
+        if len(a.calendar) != 1:
+            sys.exit("cal: range delete takes exactly one --calendar")
+        if not (a.confirm or a.dry_run):
+            sys.exit("cal: range delete needs --confirm (or --dry-run to preview what it would remove)")
+        first, last = day(a.start), day(a.end)
+        targets = [e for e in rc.read(first, last, a.calendar)
+                   if first.isoformat() <= e["start"][:10] <= last.isoformat()
+                   and (a.title is None or e["title"] == a.title)]
+    if a.dry_run:
+        emit({"dry_run": True, "would_delete": len(targets), "events": targets})
+        return
+    rc.delete_icloud([t["id"] for t in targets])
+    emit({"deleted": len(targets), "events": targets})
+
+
+def cmd_move(a):
+    moved = rc.move_icloud(a.id, a.calendar[0])
+    emit({"moved": len(moved), "events": moved})
+
+
+def main() -> None:
+    p = Parser(prog="cal", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+               allow_abbrev=False)
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=Parser)
+
+    sub.add_parser("calendars", allow_abbrev=False).set_defaults(fn=lambda a: emit(rc.calendars()))
+
+    ls = sub.add_parser("list", allow_abbrev=False)
+    ls.add_argument("--calendar", action="append")
+    ls.add_argument("--from", dest="start", required=True)
+    ls.add_argument("--to", dest="end", required=True)
+    ls.set_defaults(fn=cmd_list)
+
+    ad = sub.add_parser("add", allow_abbrev=False)
+    ad.add_argument("--calendar", action="append", required=True)
+    ad.add_argument("--json", required=True)
+    ad.set_defaults(fn=cmd_add)
+
+    de = sub.add_parser("delete", allow_abbrev=False)
+    de.add_argument("--id", action="append")
+    de.add_argument("--calendar", action="append")
+    de.add_argument("--from", dest="start")
+    de.add_argument("--to", dest="end")
+    de.add_argument("--title")
+    de.add_argument("--confirm", action="store_true")
+    de.add_argument("--dry-run", action="store_true")
+    de.set_defaults(fn=cmd_delete)
+
+    mv = sub.add_parser("move", allow_abbrev=False)
+    mv.add_argument("--id", action="append", required=True)
+    mv.add_argument("--calendar", action="append", required=True)
+    mv.set_defaults(fn=cmd_move)
+
+    a = p.parse_args()
+    if getattr(a, "calendar", None) and a.cmd in ("add", "move") and len(a.calendar) != 1:
+        sys.exit(f"cal: {a.cmd} takes exactly one --calendar")
+    try:
+        a.fn(a)
+    except rc.CalendarError as err:
+        print(f"cal: {err}", file=sys.stderr)
+        sys.exit(1 if isinstance(err, rc.Refused) else 2)
+
+
+if __name__ == "__main__":
+    main()

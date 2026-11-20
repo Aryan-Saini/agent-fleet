@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Read your iMessage/SMS history from the controller's Messages database. Send only on request.
+
+Runs on the Mac directly; anywhere else it re-runs itself on the Mac over ssh (host alias from
+$MSGS_HOST, default `controller`). Stdlib only, Python 3.9 compatible (macOS's system python3).
+The database is opened read-only.
+
+    msgs recent [--limit 20]                  # latest threads, unread counts
+    msgs thread <who> [--limit 40] [--since YYYY-MM-DD]
+    msgs thread '#123'                        # a chat by the id `recent`/`thread` print
+    msgs search <text> [--who <who>] [--limit 40] [--since YYYY-MM-DD]
+    msgs send <who|#id> [text] [--file PATH ...] [--confirm]   # dry run unless --confirm
+
+<who> matches a contact name, phone number, email or group name (case-insensitive).
+`send` checks chat.db afterwards and exits non-zero unless every file and the text landed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import glob
+import os
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import uuid
+
+CHAT_DB = os.path.expanduser("~/Library/Messages/chat.db")
+ADDRESS_BOOKS = os.path.expanduser("~/Library/Application Support/AddressBook")
+APPLE_EPOCH = dt.datetime(2001, 1, 1, tzinfo=dt.timezone.utc)
+ONE_TO_ONE = 45
+# Messages.app reliably reads attachments from ~/Pictures; elsewhere it can send an empty bubble.
+OUTBOX = "Pictures/msgs-outbox"
+VERIFY_SECONDS = 30
+# ssh alias of the Mac that holds chat.db, used when this runs anywhere else.
+MAC_HOST = os.environ.get("MSGS_HOST", "controller")
+# How your own messages are labelled in output.
+ME = os.environ.get("MSGS_ME", "me")
+
+
+def relay_to_mac() -> None:
+    """Off the Mac, run this same file there (over `ssh $MSGS_HOST`) with the same arguments.
+
+    `--file` paths are local to this machine, so each one is copied into the Mac's outbox first
+    and the argument is rewritten to point there.
+    """
+    args: list[str] = []
+    for arg in sys.argv[1:]:
+        args += ["--file", arg.split("=", 1)[1]] if arg.startswith("--file=") else [arg]
+    stage = f"{OUTBOX}/{uuid.uuid4().hex}"
+    uploads = [i + 1 for i, arg in enumerate(args[:-1]) if arg == "--file"]
+    if uploads:
+        for i in uploads:
+            if not os.path.isfile(args[i]):
+                sys.exit(f"no such file: {args[i]}")
+        for i in uploads:
+            remote = f"{stage}/{os.path.basename(args[i])}"
+            with open(args[i], "rb") as src:
+                copy = f"mkdir -p {shlex.quote(stage)} && cat > {shlex.quote(remote)}"
+                if subprocess.run(["ssh", MAC_HOST, copy], stdin=src).returncode:
+                    sys.exit(f"could not copy {args[i]} to the Mac")
+            args[i] = f"~/{remote}"
+    with open(__file__, "rb") as src:
+        cmd = "python3 - " + " ".join(shlex.quote(a) for a in args)
+        sys.exit(subprocess.run(["ssh", MAC_HOST, cmd], stdin=src).returncode)
+
+
+def digits(value: str) -> str:
+    """Last 10 digits of a phone number, so `+1 (555) 010-1234` matches `5550101234`."""
+    return re.sub(r"\D", "", value)[-10:]
+
+
+def load_contacts() -> dict[str, str]:
+    """Handle (email, or last-10 phone digits) -> display name, from every local address book."""
+    names: dict[str, str] = {}
+    paths = glob.glob(f"{ADDRESS_BOOKS}/AddressBook-v22.abcddb") + glob.glob(
+        f"{ADDRESS_BOOKS}/Sources/*/AddressBook-v22.abcddb")
+    for path in paths:
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        people = {}
+        for pk, first, last, org, nick in db.execute(
+                "select Z_PK, ZFIRSTNAME, ZLASTNAME, ZORGANIZATION, ZNICKNAME from ZABCDRECORD"):
+            name = " ".join(filter(None, [first, last])) or nick or org
+            if name:
+                people[pk] = name
+        for owner, number in db.execute("select ZOWNER, ZFULLNUMBER from ZABCDPHONENUMBER"):
+            if owner in people and number and digits(number):
+                names[digits(number)] = people[owner]
+        for owner, addr in db.execute("select ZOWNER, ZADDRESS from ZABCDEMAILADDRESS"):
+            if owner in people and addr:
+                names[addr.lower()] = people[owner]
+        db.close()
+    return names
+
+
+def handle_name(handle: str, contacts: dict[str, str]) -> str:
+    key = handle.lower() if "@" in handle else digits(handle)
+    return contacts.get(key, handle)
+
+
+def when(stamp: int) -> dt.datetime:
+    """Messages stores nanoseconds since 2001 (seconds on very old rows)."""
+    seconds = stamp / 1e9 if stamp > 1e12 else stamp
+    return (APPLE_EPOCH + dt.timedelta(seconds=seconds)).astimezone()
+
+
+def apple_stamp(day: str) -> int:
+    local = dt.datetime.fromisoformat(day).astimezone()
+    return int((local - APPLE_EPOCH).total_seconds() * 1e9)
+
+
+def body(text: str | None, blob: bytes | None, has_attachment: int) -> str:
+    """Message text. Modern macOS leaves `text` NULL and stores it in a typedstream blob."""
+    if not text and blob:
+        i = blob.find(b"NSString")
+        if i >= 0:
+            i += len(b"NSString") + 5
+            size = blob[i]
+            i += 1
+            if size == 0x81:
+                size = int.from_bytes(blob[i:i + 2], "little")
+                i += 2
+            elif size == 0x82:
+                size = int.from_bytes(blob[i:i + 4], "little")
+                i += 4
+            text = blob[i:i + size].decode("utf-8", "replace")
+    text = (text or "").replace("￼", "").strip()
+    if has_attachment:
+        text = f"[attachment] {text}".strip()
+    return text or "[empty]"
+
+
+class Messages:
+    def __init__(self) -> None:
+        self.db = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
+        self.contacts = load_contacts()
+        self.chats: dict[int, dict] = {}
+        for rowid, guid, style, display in self.db.execute(
+                "select ROWID, guid, style, display_name from chat"):
+            self.chats[rowid] = {"id": rowid, "guid": guid, "style": style, "display": display or "",
+                                 "handles": []}
+        for chat_id, handle in self.db.execute(
+                "select chj.chat_id, h.id from chat_handle_join chj join handle h on h.ROWID = chj.handle_id"):
+            if chat_id in self.chats:
+                self.chats[chat_id]["handles"].append(handle)
+
+    def title(self, chat: dict) -> str:
+        if chat["display"]:
+            return chat["display"]
+        people = [handle_name(h, self.contacts) for h in chat["handles"]]
+        return ", ".join(dict.fromkeys(people)) or chat["guid"]
+
+    def resolve(self, who: str) -> list[dict]:
+        """Chats for <who>: a `#id`, else the one person's 1:1 chats, else one matching group."""
+        if who.startswith("#") and who[1:].isdigit():
+            chat = self.chats.get(int(who[1:]))
+            if not chat:
+                sys.exit(f"no chat {who}")
+            return [chat]
+        needle = who.lower().strip()
+        needle_digits = digits(who) if len(re.sub(r"\D", "", who)) >= 7 else ""
+
+        def matches(chat: dict) -> bool:
+            if needle in chat["display"].lower():
+                return True
+            for h in chat["handles"]:
+                if needle in h.lower() or needle in handle_name(h, self.contacts).lower():
+                    return True
+                if needle_digits and digits(h) == needle_digits:
+                    return True
+            return False
+
+        found = [c for c in self.chats.values() if matches(c)]
+        direct = [c for c in found if c["style"] == ONE_TO_ONE]
+        # One person can have several 1:1 chats (phone, email, SMS); those merge.
+        if direct and len({self.title(c) for c in direct}) == 1:
+            return direct
+        pool = direct or found
+        # An exact name beats partial ones: `Sam` means Sam, not `Sam Work`.
+        exact = [c for c in pool if self.title(c).lower() == needle]
+        if exact and len({self.title(c) for c in exact}) == 1:
+            return exact
+        if len(pool) == 1:
+            return pool
+        if not pool:
+            sys.exit(f"no chat matches {who!r}")
+        lines = [f"  #{c['id']:<6} {self.title(c)}" for c in self.by_recency(pool)[:15]]
+        sys.exit(f"{who!r} matches {len(pool)} chats; pick one with '#<id>':\n" + "\n".join(lines))
+
+    def by_recency(self, chats: list[dict]) -> list[dict]:
+        latest = dict(self.db.execute(
+            "select chat_id, max(message_date) from chat_message_join group by chat_id").fetchall())
+        return sorted(chats, key=lambda c: latest.get(c["id"]) or 0, reverse=True)
+
+    def messages(self, chat_ids: list[int], since: str | None, text: str | None, limit: int) -> list[tuple]:
+        """Newest `limit` real messages (no tapbacks), returned oldest first."""
+        where = ["m.associated_message_type = 0"]
+        params: list = []
+        if chat_ids:
+            where.append(f"cmj.chat_id in ({','.join('?' * len(chat_ids))})")
+            params += chat_ids
+        if since:
+            where.append("m.date >= ?")
+            params.append(apple_stamp(since))
+        rows = self.db.execute(
+            f"""select m.date, m.is_from_me, h.id, m.text, m.attributedBody, m.cache_has_attachments,
+                       cmj.chat_id
+                from message m join chat_message_join cmj on cmj.message_id = m.ROWID
+                left join handle h on h.ROWID = m.handle_id
+                where {' and '.join(where)} order by m.date desc""", params)
+        out = []
+        for date, mine, handle, raw, blob, attach, chat_id in rows:
+            content = body(raw, blob, attach)
+            if text and text.lower() not in content.lower():
+                continue
+            sender = ME if mine else handle_name(handle or "?", self.contacts)
+            out.append((when(date), sender, content, chat_id))
+            if len(out) >= limit:
+                break
+        return out[::-1]
+
+
+def cmd_recent(m: Messages, args) -> None:
+    rows = m.db.execute(
+        """select cmj.chat_id, max(m.date), sum(m.is_read = 0 and m.is_from_me = 0)
+           from message m join chat_message_join cmj on cmj.message_id = m.ROWID
+           where m.associated_message_type = 0
+           group by cmj.chat_id order by max(m.date) desc limit ?""", (args.limit,)).fetchall()
+    for chat_id, _, unread in rows:
+        chat = m.chats.get(chat_id)
+        if not chat:
+            continue
+        last = m.messages([chat_id], None, None, 1)
+        if not last:
+            continue
+        stamp, sender, content, _ = last[0]
+        flag = f" ({unread} unread)" if unread else ""
+        print(f"#{chat_id:<6} {stamp:%b %d %H:%M}  {m.title(chat)}{flag}\n         {sender}: {content[:140]}")
+
+
+def print_messages(m: Messages, rows: list[tuple], label_chats: bool) -> None:
+    for stamp, sender, content, chat_id in rows:
+        where = f"[{m.title(m.chats[chat_id])}] " if label_chats and chat_id in m.chats else ""
+        print(f"{stamp:%Y-%m-%d %H:%M}  {where}{sender}: {content}")
+
+
+def cmd_thread(m: Messages, args) -> None:
+    chats = m.resolve(args.who)
+    print(f"== {m.title(chats[0])}  ({', '.join('#' + str(c['id']) for c in chats)})")
+    print_messages(m, m.messages([c["id"] for c in chats], args.since, None, args.limit), False)
+
+
+def cmd_search(m: Messages, args) -> None:
+    chat_ids = [c["id"] for c in m.resolve(args.who)] if args.who else []
+    print_messages(m, m.messages(chat_ids, args.since, args.text, args.limit), True)
+
+
+def stage(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Copy each file into its own outbox dir (relayed files already sit there).
+
+    Returns (staged file paths, dirs to delete afterwards). The name is kept, since the
+    recipient sees it.
+    """
+    outbox = os.path.realpath(os.path.expanduser(f"~/{OUTBOX}"))
+    paths = [os.path.realpath(os.path.expanduser(p)) for p in paths]
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        sys.exit(f"no such file: {', '.join(missing)}")
+    staged, dirs = [], []
+    for path in paths:
+        if os.path.dirname(os.path.dirname(path)) == outbox:
+            staged.append(path)
+        else:
+            folder = os.path.join(outbox, uuid.uuid4().hex)
+            os.makedirs(folder)
+            staged.append(shutil.copy2(path, folder))
+        dirs.append(os.path.dirname(staged[-1]))
+    return staged, dirs
+
+
+def osascript(lines: list[str], *argv: str) -> None:
+    cmd = ["osascript"] + [part for line in lines for part in ("-e", line)] + list(argv)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode:
+        sys.exit(f"send failed: {proc.stderr.strip()}")
+
+
+# `send POSIX file ...` straight to a chat sends an empty bubble without the file (seen
+# on macOS 27). Coercing to an alias first delivers the attachment.
+SEND_FILE = ['on run argv', 'set f to (POSIX file (item 1 of argv)) as alias',
+             'tell application "Messages" to send f to chat id (item 2 of argv)', 'end run']
+SEND_TEXT = ['on run argv', 'tell application "Messages" to send (item 1 of argv) to chat id (item 2 of argv)',
+             'end run']
+
+
+def verify(m: Messages, chat: dict, after: int, names: list[str], text: str | None) -> list[str]:
+    """Poll chat.db until every file and the text show up as sent; return what's still wrong."""
+    deadline = time.time() + VERIFY_SECONDS
+    while True:
+        rows = m.db.execute(
+            """select m.ROWID, m.text, m.attributedBody, m.error, a.transfer_name
+               from message m join chat_message_join cmj on cmj.message_id = m.ROWID
+               left join message_attachment_join maj on maj.message_id = m.ROWID
+               left join attachment a on a.ROWID = maj.attachment_id
+               where cmj.chat_id = ? and m.ROWID > ? and m.is_from_me = 1""",
+            (chat["id"], after)).fetchall()
+        got_files = {name for _, _, _, error, name in rows if name and not error}
+        got_text = {body(raw, blob, 0) for _, raw, blob, error, name in rows if not name and not error}
+        problems = [f"file {n!r} not in the chat" for n in names if n not in got_files]
+        if text and text not in got_text:
+            problems.append("text not in the chat")
+        failed = sorted({rowid for rowid, _, _, error, _ in rows if error})
+        if failed:
+            problems.append(f"Messages reported errors on message ids {failed}")
+        empty = sum(1 for _, raw, blob, _, name in rows if not name and body(raw, blob, 0) == "[empty]")
+        if empty:
+            problems.append(f"{empty} empty bubble(s) went out; tell the user so they can unsend them")
+        if not problems or time.time() > deadline:
+            return problems
+        time.sleep(1)
+
+
+def cmd_send(m: Messages, args) -> None:
+    """Send files and/or text into an existing chat, then confirm in chat.db that they landed.
+
+    Without --confirm it only shows what would be sent.
+    """
+    text = (args.text or "").strip() or None
+    if not text and not args.file:
+        sys.exit("nothing to send: give text, --file, or both")
+    staged, dirs = stage(args.file)
+    try:
+        chat = m.by_recency(m.resolve(args.who))[0]
+        print(f"to:   {m.title(chat)}  (#{chat['id']}, {chat['guid']})")
+        for path in staged:
+            print(f"file: {os.path.basename(path)}  ({os.path.getsize(path)} bytes)")
+        if text:
+            print(f"text: {text}")
+        if not args.confirm:
+            print("\ndry run: nothing sent. Re-run with --confirm once the user has said to send it.")
+            return
+        after = m.db.execute("select coalesce(max(ROWID), 0) from message").fetchone()[0]
+        for path in staged:
+            osascript(SEND_FILE, path, chat["guid"])
+        if text:
+            osascript(SEND_TEXT, text, chat["guid"])
+        problems = verify(m, chat, after, [os.path.basename(p) for p in staged], text)
+        if problems:
+            sys.exit("NOT CONFIRMED, do not resend blindly; check `msgs thread` first:\n  "
+                     + "\n  ".join(problems))
+        print("sent and confirmed in chat.db")
+    finally:
+        for folder in dirs:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def main() -> None:
+    if sys.platform != "darwin":
+        relay_to_mac()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    subs = parser.add_subparsers(dest="cmd", required=True)
+
+    p = subs.add_parser("recent")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(fn=cmd_recent)
+
+    p = subs.add_parser("thread")
+    p.add_argument("who")
+    p.add_argument("--limit", type=int, default=40)
+    p.add_argument("--since", metavar="YYYY-MM-DD")
+    p.set_defaults(fn=cmd_thread)
+
+    p = subs.add_parser("search")
+    p.add_argument("text")
+    p.add_argument("--who")
+    p.add_argument("--limit", type=int, default=40)
+    p.add_argument("--since", metavar="YYYY-MM-DD")
+    p.set_defaults(fn=cmd_search)
+
+    p = subs.add_parser("send")
+    p.add_argument("who")
+    p.add_argument("text", nargs="?")
+    p.add_argument("--file", action="append", default=[], metavar="PATH", help="attach a file (repeatable)")
+    p.add_argument("--confirm", action="store_true")
+    p.set_defaults(fn=cmd_send)
+
+    args = parser.parse_args()
+    args.fn(Messages(), args)
+
+
+if __name__ == "__main__":
+    main()

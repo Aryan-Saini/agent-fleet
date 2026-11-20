@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Your Spotify from the command line, on the controller and any worker. Stdlib only.
+
+Credentials live in ~/.config/spotify.env (never in a repo):
+  SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI, SPOTIFY_REFRESH_TOKEN
+
+  spotify auth                           one-time consent: prints a URL, waits for the redirect
+  spotify devices                        Spotify Connect devices: name, type, id, active
+  spotify playlists                      your playlists: id, track count, name
+  spotify tracks PLAYLIST [--newest]     track URIs + names, optionally newest added first
+  spotify sort PLAYLIST                  reorder the playlist itself, newest added first (keeps dates)
+  spotify search QUERY [--type T]        top 5 URIs for track (default) | album | artist | playlist
+  spotify play WHAT --device NAME [--newest] [--shuffle]
+  spotify transfer NAME                  move what is playing now to another device, keep playing
+  spotify resume [--device NAME] | pause | now
+  spotify volume PERCENT [--device NAME]
+  spotify api METHOD PATH [JSON]         any Web API call, prints the JSON
+  spotify token                          print a fresh access token, for other scripts
+
+PLAYLIST is a name (case-insensitive), an id, or a spotify:playlist: URI. WHAT is a PLAYLIST or any
+spotify:track/album/artist URI (from `search`). NAME is the device's Spotify name or a plain word
+for it (tv, speaker, laptop, phone; see ALIASES).
+"""
+
+from __future__ import annotations  # PEP 604 hints on macOS's system Python 3.9
+
+import base64
+import functools
+import http.server
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+ENV = Path.home() / ".config" / "spotify.env"
+SCOPES = (
+    "user-read-playback-state user-modify-playback-state user-read-currently-playing "
+    "playlist-read-private playlist-read-collaborative user-library-read "
+    "playlist-modify-public playlist-modify-private"
+)
+
+
+def load_env() -> dict[str, str]:
+    if not ENV.exists():
+        sys.exit(f"{ENV} missing; see the spotify skill")
+    pairs = (line.split("=", 1) for line in ENV.read_text().splitlines() if "=" in line and not line.startswith("#"))
+    return {k.strip(): v.strip() for k, v in pairs}
+
+
+def save_env(env: dict[str, str]) -> None:
+    ENV.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+    ENV.chmod(0o600)
+
+
+def token_request(env: dict[str, str], form: dict[str, str]) -> dict:
+    basic = base64.b64encode(f"{env['SPOTIFY_CLIENT_ID']}:{env['SPOTIFY_CLIENT_SECRET']}".encode()).decode()
+    req = urllib.request.Request(
+        "https://accounts.spotify.com/api/token",
+        data=urllib.parse.urlencode(form).encode(),
+        headers={"Authorization": f"Basic {basic}"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
+def access_token() -> str:
+    env = load_env()
+    if "SPOTIFY_REFRESH_TOKEN" not in env:
+        sys.exit("not authorized yet: run `spotify auth` on a machine with a browser")
+    tok = token_request(env, {"grant_type": "refresh_token", "refresh_token": env["SPOTIFY_REFRESH_TOKEN"]})
+    if tok.get("refresh_token") and tok["refresh_token"] != env["SPOTIFY_REFRESH_TOKEN"]:
+        env["SPOTIFY_REFRESH_TOKEN"] = tok["refresh_token"]
+        save_env(env)
+    return tok["access_token"]
+
+
+@functools.cache
+def token() -> str:
+    return access_token()
+
+
+def api(method: str, path: str, body: dict | None = None) -> dict | None:
+    url = path if path.startswith("https://") else f"https://api.spotify.com/v1{path}"
+    req = urllib.request.Request(
+        url,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        sys.exit(f"{method} {path} -> {e.code}: {e.read().decode()[:300]}")
+    try:
+        return json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:  # some player endpoints answer with a bare id instead of JSON
+        return None
+
+
+def paged(path: str) -> list[dict]:
+    items: list[dict] = []
+    url: str | None = path
+    while url:
+        page = api("GET", url) or {}
+        items += page.get("items", [])
+        url = page.get("next")
+    return items
+
+
+# Plain words you use for each place -> its exact Spotify Connect name, as `spotify devices`
+# prints it (copy it, apostrophes included: macOS names often use a curly one). The spotify
+# skill says how each one has to be woken up before it shows in `devices`.
+ALIASES = {
+    "<speaker name>": ["speaker", "bedroom", "google home"],
+    "<console or TV name>": ["tv", "console", "living room"],
+    "<laptop name>": ["laptop", "mac", "computer"],
+    "iPhone": ["phone", "iphone"],
+}
+
+
+def devices() -> list[dict]:
+    return (api("GET", "/me/player/devices") or {}).get("devices", [])
+
+
+def device_id(name: str) -> str:
+    """Exact Spotify name first, then an alias, then a unique substring (all case-insensitive)."""
+    have = devices()
+    want = name.casefold()
+    by_name = {d["name"].casefold(): d["id"] for d in have}
+    if want in by_name:
+        return by_name[want]
+    for real, words in ALIASES.items():
+        if want in words:  # an alias never falls through to a substring ("speaker" must not hit a librespot bridge named "Speaker bridge")
+            if real.casefold() in by_name:
+                return by_name[real.casefold()]
+            break
+    hits = [d["id"] for d in have if want in d["name"].casefold()]
+    if len(hits) == 1 and not any(want in w for w in ALIASES.values()):
+        return hits[0]
+    target = next((real for real, words in ALIASES.items() if want in words), name)
+    sys.exit(f"{target!r} isn't online in Spotify right now; online: {[d['name'] for d in have]}. "
+             "See the spotify skill for how to wake it.")
+
+
+def playlist_id(ref: str) -> str:
+    if ref.startswith("spotify:playlist:"):
+        return ref.rsplit(":", 1)[1]
+    for p in paged("/me/playlists?limit=50"):
+        if p and (p["id"] == ref or p["name"].strip().lower() == ref.strip().lower()):
+            return p["id"]
+    sys.exit(f"no playlist {ref!r}")
+
+
+def tracks(pid: str, newest: bool) -> list[tuple[str, str]]:
+    """(uri, "Artist - Title") pairs in playlist order, or newest added first."""
+    rows = []
+    for i in paged(f"/playlists/{pid}/items?limit=100"):
+        t = i.get("item") or i.get("track") or {}  # Feb 2026 renamed track -> item
+        if t.get("uri") and not t["uri"].startswith("spotify:local:"):
+            artists = ", ".join(a["name"] for a in t.get("artists", []))
+            rows.append((i.get("added_at", ""), t["uri"], f"{artists} - {t.get('name', '')}"))
+    if newest:
+        rows.sort(key=lambda r: r[0], reverse=True)
+    return [(uri, label) for _, uri, label in rows]
+
+
+def sort_newest(pid: str) -> int:
+    """Reorder a playlist in place so its custom order matches date added, newest first.
+
+    Moves items one at a time with the reorder endpoint. Replacing the item list would be one call,
+    but it resets every item's added_at to now. Ties keep their current order. Returns moves made.
+    """
+    current = [i.get("added_at", "") for i in paged(f"/playlists/{pid}/items?limit=100&fields=next,items(added_at)")]
+    order = list(range(len(current)))  # order[k] = original index of the item now at position k
+    target = sorted(order, key=lambda k: current[k], reverse=True)  # stable, so ties keep order
+    snapshot = (api("GET", f"/playlists/{pid}?fields=snapshot_id") or {})["snapshot_id"]
+    moves = 0
+    for pos, want in enumerate(target):
+        at = order.index(want)
+        if at == pos:
+            continue
+        body = {"range_start": at, "insert_before": pos, "snapshot_id": snapshot}
+        snapshot = (api("PUT", f"/playlists/{pid}/items", body) or {}).get("snapshot_id", snapshot)
+        order.insert(pos, order.pop(at))
+        moves += 1
+    return moves
+
+
+def auth() -> None:
+    env = load_env()
+    redirect = env["SPOTIFY_REDIRECT_URI"]
+    q = urllib.parse.urlencode(
+        {"client_id": env["SPOTIFY_CLIENT_ID"], "response_type": "code", "redirect_uri": redirect, "scope": SCOPES}
+    )
+    url = f"https://accounts.spotify.com/authorize?{q}"
+    got: dict[str, str] = {}
+
+    class Catch(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            got.update({k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()})
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Spotify linked. You can close this tab.")
+
+        def log_message(self, *_: object) -> None:
+            pass
+
+    parsed = urllib.parse.urlparse(redirect)
+    server = http.server.HTTPServer((parsed.hostname or "127.0.0.1", parsed.port or 80), Catch)
+    print(f"Approve in the browser:\n{url}", flush=True)
+    while "code" not in got and "error" not in got:
+        server.handle_request()
+    if "error" in got:
+        sys.exit(f"denied: {got['error']}")
+    tok = token_request(env, {"grant_type": "authorization_code", "code": got["code"], "redirect_uri": redirect})
+    env["SPOTIFY_REFRESH_TOKEN"] = tok["refresh_token"]
+    save_env(env)
+    me = api("GET", "/me") or {}
+    print(f"linked as {me.get('display_name')}; now copy {ENV} to every other machine")
+
+
+def flag(args: list[str], name: str) -> str | None:
+    return args[args.index(name) + 1] if name in args else None
+
+
+def main() -> None:
+    cmd, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("help", [])
+    if cmd == "auth":
+        auth()
+    elif cmd == "token":
+        print(token())
+    elif cmd == "devices":
+        for d in devices():
+            print(f"{d['name']}\t{d['type']}\t{d['id']}\t{'active' if d['is_active'] else ''}")
+    elif cmd == "playlists":
+        for p in paged("/me/playlists?limit=50"):
+            if p:
+                print(f"{p['id']}\t{(p.get('items') or p.get('tracks') or {}).get('total', '?')}\t{p['name']}")
+    elif cmd == "tracks":
+        for uri, label in tracks(playlist_id(args[0]), "--newest" in args):
+            print(f"{uri}\t{label}")
+    elif cmd == "sort":
+        print(f"{sort_newest(playlist_id(args[0]))} moves")
+    elif cmd == "search":
+        kind = flag(args, "--type") or "track"
+        q = urllib.parse.quote(args[0])
+        for x in (api("GET", f"/search?type={kind}&limit=5&q={q}") or {}).get(f"{kind}s", {}).get("items", []):
+            if x:
+                by = ", ".join(a["name"] for a in x.get("artists", [])) or (x.get("owner") or {}).get("display_name", "")
+                print(f"{x['uri']}\t{by + ' - ' if by else ''}{x['name']}")
+    elif cmd == "play":
+        dev = device_id(flag(args, "--device") or sys.exit("--device NAME required"))
+        if args[0].startswith(("spotify:track:", "spotify:album:", "spotify:artist:")):
+            kind = "uris" if args[0].startswith("spotify:track:") else "context_uri"
+            api("PUT", f"/me/player/play?device_id={dev}", {kind: [args[0]] if kind == "uris" else args[0]})
+            print("playing")
+            return
+        pid = playlist_id(args[0])
+        api("PUT", f"/me/player/shuffle?state={'true' if '--shuffle' in args else 'false'}&device_id={dev}")
+        if "--newest" in args:
+            # The API can't sort a playlist context, so queue the URIs ourselves (cap keeps the body small).
+            uris = [uri for uri, _ in tracks(pid, newest=True)][:300]
+            api("PUT", f"/me/player/play?device_id={dev}", {"uris": uris})
+        else:
+            api("PUT", f"/me/player/play?device_id={dev}", {"context_uri": f"spotify:playlist:{pid}"})
+        print("playing")
+    elif cmd == "transfer":
+        api("PUT", "/me/player", {"device_ids": [device_id(args[0])], "play": True})
+        print("moved")
+    elif cmd == "resume":
+        dev = flag(args, "--device")
+        api("PUT", "/me/player/play" + (f"?device_id={device_id(dev)}" if dev else ""))
+    elif cmd == "pause":
+        api("PUT", "/me/player/pause")
+    elif cmd == "now":
+        p = api("GET", "/me/player") or {}
+        item = p.get("item") or {}
+        print(f"{'playing' if p.get('is_playing') else 'paused'} on {p.get('device', {}).get('name')}: "
+              f"{', '.join(a['name'] for a in item.get('artists', []))} - {item.get('name')}" if p else "nothing playing")
+    elif cmd == "volume":
+        dev = flag(args, "--device")
+        api("PUT", f"/me/player/volume?volume_percent={int(args[0])}" + (f"&device_id={device_id(dev)}" if dev else ""))
+    elif cmd == "api":
+        print(json.dumps(api(args[0].upper(), args[1], json.loads(args[2]) if len(args) > 2 else None), indent=2))
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

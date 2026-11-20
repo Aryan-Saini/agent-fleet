@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# nightly-report: example job for packages/linux-automations. Replace the body with yours.
+# Runs under systemd: no shell profile, a minimal PATH, no cwd worth trusting. Absolute paths
+# for files, an explicit PATH for tools, non-zero exit on real failure.
+set -euo pipefail
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin"
+
+out="$HOME/drop/nightly-report-$(date +%F).txt"
+mkdir -p "$(dirname "$out")"
+{
+  echo "host: $(uname -n)"
+  echo "uptime: $(uptime -p)"
+  echo "disk:"; df -h / | tail -1
+  echo "failed units:"; systemctl --user --failed --no-legend || true
+} > "$out"
+echo "wrote $out"

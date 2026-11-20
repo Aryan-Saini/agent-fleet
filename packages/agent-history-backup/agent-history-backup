@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# agent-history-backup: one restic snapshot a day of this machine's agent chat history (Claude
+# Code, Codex, Cursor, opencode, T3 Code, and a few desktop apps on macOS). packages/agent-history-backup.
+#
+# Why: Claude Code prunes ~/.claude/projects on a rolling 30-day window, so an old transcript is
+# gone locally. Codex, Cursor and T3 keep everything but have exactly one copy, on this disk.
+#
+# Retention is forever: never run `restic forget` or `prune` on this repo. A file pruned locally
+# lives on only in older snapshots, and restic dedups by content, so an unchanged file costs
+# nothing in a new snapshot.
+#
+# Live sqlite stores are copied with `.backup` into $STAGE first (a plain copy of a db with a hot
+# WAL is not consistent), integrity-checked, and backed up from there.
+#
+# Config, read from ~/.config/restic/agent-history.env if present (names only, no secrets there):
+#   RESTIC_REPOSITORY      e.g. s3:s3.<region>.amazonaws.com/<your-bucket>/restic
+#   AWS_PROFILE            the aws profile restic uses, if not the default
+#   BACKUP_HOST            snapshot host name (default: short hostname)
+# Password: ~/.config/restic/agent-history.pass, mode 600. Keep a second copy off this machine.
+# Restore: agent-history-restore. Safe to run daily and safe to run twice.
+set -uo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+CONF="$HOME/.config/restic/agent-history.env"
+# shellcheck disable=SC1090
+[ -r "$CONF" ] && . "$CONF"
+export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
+export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/agent-history.pass}"
+[ -n "${AWS_PROFILE:-}" ] && export AWS_PROFILE
+HOST="${BACKUP_HOST:-$(hostname -s 2>/dev/null || uname -n)}"
+OS="$(uname -s)"
+if [ "$OS" = Darwin ]; then
+  STATE_DIR="$HOME/Library/Caches/agent-history-backup"
+  APPSUP="$HOME/Library/Application Support"
+  mtime_size() { stat -f '%m %z' "$1"; }
+else
+  STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/agent-history-backup"
+  APPSUP="${XDG_CONFIG_HOME:-$HOME/.config}"
+  mtime_size() { stat -c '%Y %s' "$1"; }
+fi
+STAGE="$STATE_DIR/stage"   # sqlite snapshots, rebuilt every run
+
+failures=0
+note() { echo "[$(date '+%H:%M:%S')] $*"; }
+fail() { echo "[$(date '+%H:%M:%S')] FAIL: $*" >&2; failures=$((failures + 1)); }
+give_up() {
+  echo "agent-history-backup: $1" >&2
+  command -v fleet-alert >/dev/null && fleet-alert "agent-history-backup" "$1" || true
+  exit 1
+}
+
+command -v restic >/dev/null || give_up "restic not on PATH"
+command -v sqlite3 >/dev/null || give_up "sqlite3 not on PATH"
+[ -n "$RESTIC_REPOSITORY" ] || give_up "RESTIC_REPOSITORY not set (see $CONF)"
+[ -r "$RESTIC_PASSWORD_FILE" ] || give_up "missing $RESTIC_PASSWORD_FILE"
+mkdir -p "$STATE_DIR"
+
+# The stage is shared between runs, so two runs must not overlap. mkdir is atomic everywhere.
+LOCK="$STATE_DIR/lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if kill -0 "$(cat "$LOCK/pid" 2>/dev/null)" 2>/dev/null; then
+    note "another run (pid $(cat "$LOCK/pid")) is in progress, skipping"; exit 0
+  fi
+  rm -rf "$LOCK"; mkdir "$LOCK" || give_up "cannot take $LOCK"
+fi
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$STAGE" "$LOCK"' EXIT
+rm -rf "$STAGE"; mkdir -p "$STAGE"
+
+# Regenerable or live-written junk. SQLite sidecars are excluded because a -wal without its
+# parent db can make a restore look valid and read wrong. A pattern without a slash matches any
+# path component, so "node_modules" drops every node_modules dir.
+EXCLUDES=(
+  --exclude "*.DS_Store" --exclude "node_modules" --exclude "*.tmp"
+  --exclude "*-wal" --exclude "*-shm" --exclude "*.sock"
+  --exclude "Cache" --exclude "GPUCache"
+)
+
+# restic treats a missing source as an error, so add only what exists.
+PATHS=()
+add_path() { if [ -e "$1" ]; then PATHS+=("$1"); else note "skip $1 (absent)"; fi; }
+
+# snapshot_sqlite <abs-db> <stage-relpath> [reindex]: a consistent copy of a live db.
+# "reindex" rebuilds the copy's indexes before the integrity check, for stores whose indexes
+# drift out of sync in normal use (T3 Code's), so even a faithful copy fails quick_check.
+snapshot_sqlite() {
+  local db="$1"
+  local snap="$STAGE/$2"
+  if [ ! -f "$db" ]; then note "skip $2 (absent)"; return 0; fi
+  mkdir -p "$(dirname "$snap")"
+  if ! sqlite3 "$db" ".backup '$snap'"; then fail "$2: snapshot failed"; rm -f "$snap"; return 1; fi
+  if [ "${3:-}" = reindex ] && ! sqlite3 "$snap" "REINDEX;"; then
+    fail "$2: reindex failed"; rm -f "$snap"; return 1
+  fi
+  if ! sqlite3 "$snap" "pragma quick_check;" | grep -qx ok; then
+    fail "$2: snapshot failed integrity check"; rm -f "$snap"; return 1
+  fi
+  note "snapshotted $2 ($(du -h "$snap" | cut -f1))"
+}
+
+# Cursor's globalStorage/state.vscdb can be several GB, most of it runtime state. Extract only
+# the conversation keys, and only when the source changed. The extract lives outside $STAGE so
+# an idle Cursor costs nothing but still appears in every snapshot.
+CURSOR_GLOBAL="$APPSUP/Cursor/User/globalStorage"
+CURSOR_EXTRACT="$STATE_DIR/cursor-ide/chats.sqlite"
+extract_cursor_chats() {
+  local db="$CURSOR_GLOBAL/state.vscdb" stamp="$STATE_DIR/cursor-state.vscdb.mtime"
+  local out="$STAGE/cursor-chats.sqlite" now prev extra="" convos
+  if [ ! -f "$db" ]; then note "skip cursor-ide/chats.sqlite (absent)"; return 0; fi
+  now=$(mtime_size "$db"); prev=$(cat "$stamp" 2>/dev/null || true)
+  if [ "$now" = "$prev" ] && [ -f "$CURSOR_EXTRACT" ]; then
+    note "cursor-ide/chats.sqlite unchanged since last run"; return 0
+  fi
+  # composerHeaders exists only in newer builds; copy it when present instead of assuming.
+  if [ -n "$(sqlite3 "file:$db?immutable=1" \
+       "select 1 from sqlite_master where type='table' and name='composerHeaders'" 2>/dev/null)" ]; then
+    extra="CREATE TABLE o.composerHeaders AS SELECT * FROM composerHeaders;"
+  fi
+  # immutable=1 reads without a lock while Cursor holds the file. Safe: a changed mtime got us here.
+  if ! sqlite3 "file:$db?immutable=1" <<SQL
+ATTACH DATABASE '$out' AS o;
+CREATE TABLE o.cursorDiskKV(key TEXT PRIMARY KEY, value BLOB);
+INSERT INTO o.cursorDiskKV SELECT key,value FROM cursorDiskKV
+  WHERE key LIKE 'composerData%' OR key LIKE 'bubbleId%'
+     OR key LIKE 'messageRequestContext%' OR key LIKE 'codeBlockDiff%';
+$extra
+CREATE TABLE o.ItemTable AS SELECT * FROM ItemTable
+  WHERE key LIKE '%composer%' OR key LIKE '%aiService%' OR key LIKE '%chat%';
+SQL
+  then fail "cursor-ide/chats.sqlite: extract failed"; return 1; fi
+  if ! sqlite3 "$out" "pragma quick_check;" | grep -qx ok; then
+    fail "cursor-ide/chats.sqlite: extract failed integrity check"; return 1
+  fi
+  convos=$(sqlite3 "$out" "select count(*) from cursorDiskKV where key like 'composerData%'")
+  mkdir -p "$(dirname "$CURSOR_EXTRACT")"
+  mv -f "$out" "$CURSOR_EXTRACT"
+  echo "$now" > "$stamp"
+  note "extracted cursor-ide/chats.sqlite ($convos conversations)"
+}
+
+note "start ($HOST)"
+
+# Claude Code: transcripts and prompt history.
+add_path "$HOME/.claude/projects"
+add_path "$HOME/.claude/history.jsonl"
+# Codex: transcripts, plus the thread index, without which restored transcripts can't be listed.
+add_path "$HOME/.codex/sessions"
+add_path "$HOME/.codex/archived_sessions"
+add_path "$HOME/.codex/history.jsonl"
+for db in "$HOME"/.codex/state_*.sqlite "$HOME"/.codex/thread_history_*.sqlite; do
+  [ -f "$db" ] && snapshot_sqlite "$db" "codex/$(basename "$db")"
+done
+# Cursor: CLI agent chats, the IDE's chat extract, its search index, per-workspace data.
+add_path "$HOME/.cursor/projects"
+add_path "$HOME/.cursor/chats"
+[ -e "$HOME/.cursor/acp-sessions" ] && add_path "$HOME/.cursor/acp-sessions"
+[ -e "$HOME/.cursor/plans" ] && add_path "$HOME/.cursor/plans"
+extract_cursor_chats
+[ -f "$CURSOR_EXTRACT" ] && PATHS+=("$CURSOR_EXTRACT")
+[ -f "$CURSOR_GLOBAL/conversation-search.db" ] &&
+  snapshot_sqlite "$CURSOR_GLOBAL/conversation-search.db" "cursor-ide/conversation-search.db"
+add_path "$APPSUP/Cursor/User/workspaceStorage"
+# opencode.
+snapshot_sqlite "$HOME/.local/share/opencode/opencode.db" "opencode/opencode.db"
+# T3 Code: the event store holding every thread, and attachments. Only these two: userdata/ also
+# holds secrets/ and logs/, which do not belong in an archive. statev2 is the current name.
+for t3db in statev2.sqlite state.sqlite; do
+  [ -f "$HOME/.t3/userdata/$t3db" ] || continue
+  snapshot_sqlite "$HOME/.t3/userdata/$t3db" "t3code/$t3db" reindex
+  break
+done
+add_path "$HOME/.t3/userdata/attachments"
+# Desktop apps that only exist on macOS here. Absent ones are skipped.
+if [ "$OS" = Darwin ]; then
+  [ -f "$APPSUP/Antigravity/User/globalStorage/state.vscdb" ] &&
+    snapshot_sqlite "$APPSUP/Antigravity/User/globalStorage/state.vscdb" "antigravity/globalStorage.vscdb"
+  [ -d "$APPSUP/Antigravity/User/workspaceStorage" ] && add_path "$APPSUP/Antigravity/User/workspaceStorage"
+  [ -f "$APPSUP/Wispr Flow/flow.sqlite" ] &&
+    snapshot_sqlite "$APPSUP/Wispr Flow/flow.sqlite" "wispr-flow/flow.sqlite"
+fi
+
+PATHS+=("$STAGE")
+
+# restic exits 3 when the snapshot was written but some files could not be read. A file that
+# vanished mid-run (a pruned or rotated transcript) is not a failure; anything else is.
+errlog="$STATE_DIR/restic-stderr.log"
+nice -n 10 restic backup --host "$HOST" --tag daily --compression max "${EXCLUDES[@]}" \
+  "${PATHS[@]}" 2> "$errlog"
+rc=$?
+cat "$errlog" >&2
+if [ "$rc" -eq 3 ] && ! grep '^error:' "$errlog" | grep -qv 'no such file or directory'; then
+  note "backup written; some files vanished mid-run"
+elif [ "$rc" -ne 0 ]; then
+  fail "restic backup exited $rc"
+fi
+
+[ "$failures" -gt 0 ] && give_up "$failures failure(s), see the log"
+note "done, snapshot written"

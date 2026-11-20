@@ -1,0 +1,13 @@
+[Unit]
+Description=Run nightly-report daily at 05:30
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+# A run missed while the box was down (reboot, power cut, deep update) fires on the next boot.
+Persistent=true
+AccuracySec=1min
+# Spread load if several jobs share a slot. Drop it for jobs that must start on time.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

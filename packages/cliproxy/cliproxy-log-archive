@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# cliproxy-log-archive: move the CLIProxyAPI hub's request logs to S3, compressed. Linux worker.
+# Reference implementation for packages/cliproxy; run daily from a systemd user timer.
+#
+# With request-log on, the hub writes one plain-text file per request into $LOGS: the client's
+# request, the upstream request, the upstream response, and the reply. Auth headers are masked by
+# the hub before they are written. Each run moves finished files into a staging dir, packs them
+# into one tar.zst, verifies it holds every file, uploads it, checks the size S3 reports, and only
+# then deletes the local copy. Turns of one thread resend the same context, so a long zstd window
+# (--long=30) collapses most of the volume.
+#
+# Idempotent: a failed upload leaves its archive staged and the next run retries it first.
+#
+# Settings (environment, or edit the defaults):
+#   CLIPROXY_DIR        hub install dir holding logs/          (default ~/cliproxyapi)
+#   ARCHIVE_BUCKET      S3 bucket                               (required)
+#   ARCHIVE_PREFIX      key prefix                              (default cliproxy-logs)
+#   AWS_PROFILE         the aws cli profile to use, if any
+#   CLIPROXY_UNIT       hub's systemd user unit                 (default cliproxyapi.service)
+#
+# Read one back:
+#   aws s3 cp s3://<bucket>/<prefix>/<key> - | zstd -d --long=30 | tar -t
+set -euo pipefail
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+DIR="${CLIPROXY_DIR:-$HOME/cliproxyapi}"
+LOGS="$DIR/logs"
+STAGING="$DIR/archive-staging"
+BUCKET="${ARCHIVE_BUCKET:?set ARCHIVE_BUCKET}"
+PREFIX="${ARCHIVE_PREFIX:-cliproxy-logs}"
+HUB_UNIT="${CLIPROXY_UNIT:-cliproxyapi.service}"
+SETTLE_MIN=5   # files untouched this long are finished; the hub writes each once, at the end
+
+note() { echo "[$(date '+%H:%M:%S')] $*"; }
+die() {
+  echo "[$(date '+%H:%M:%S')] FAIL: $*" >&2
+  command -v fleet-alert >/dev/null && fleet-alert "cliproxy-log-archive" "$*" || true
+  exit 1
+}
+
+command -v aws >/dev/null || die "aws cli not on PATH"
+command -v zstd >/dev/null || die "zstd not on PATH"
+mkdir -p "$LOGS" "$STAGING"
+
+# upload_run <run-dir>: upload its archive, check the size S3 reports, remove the run.
+upload_run() {
+  local run="$1" archive id key local_size remote_size
+  archive=$(find "$run" -maxdepth 1 -name '*.tar.zst' | head -1)
+  [ -n "$archive" ] || die "$run has no archive"
+  id=$(basename "$run")
+  key="${id:0:4}/${id:4:2}/${id:6:2}/$(basename "$archive")"   # YYYY/MM/DD/<name>
+  aws s3 cp "$archive" "s3://$BUCKET/$PREFIX/$key" --only-show-errors || die "upload of $key failed"
+  local_size=$(stat -c %s "$archive")
+  remote_size=$(aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$key" \
+    --query ContentLength --output text) || die "head-object $key failed"
+  [ "$local_size" = "$remote_size" ] || die "$key size mismatch: local $local_size, S3 $remote_size"
+  rm -rf "$run"
+  note "uploaded $key ($(numfmt --to=iec "$local_size"))"
+}
+
+# 1. Retry anything a previous run packed but did not get into S3; unpack a half-packed run.
+for run in "$STAGING"/*/; do
+  [ -d "$run" ] || continue
+  run="${run%/}"
+  if [ -f "$run/PACKED" ]; then
+    note "retrying upload from $(basename "$run")"; upload_run "$run"
+  else
+    note "recovering unpacked files from $(basename "$run")"
+    find "$run/files" -maxdepth 1 -type f -exec mv -n -t "$LOGS" {} + 2>/dev/null || true
+    find "$run/files/orphaned-parts" -mindepth 1 -maxdepth 1 -type d -exec mv -n -t "$LOGS" {} + 2>/dev/null || true
+    rm -rf "$run"
+  fi
+done
+
+# 2. Take the finished request logs. mv on the same filesystem is atomic.
+RUN_ID="$(date +%Y%m%dT%H%M%S)"
+RUN="$STAGING/$RUN_ID"
+mkdir -p "$RUN/files"
+find "$LOGS" -maxdepth 1 -type f -name '*.log' -mmin +"$SETTLE_MIN" -exec mv -t "$RUN/files" {} +
+# The hub keeps in-flight parts in request-log-parts-* and deletes them when a request ends, but
+# never sweeps at startup, so a restart mid-request orphans them. Take only dirs untouched since
+# the running hub started.
+hub_start=$(systemctl --user show -p ExecMainStartTimestamp --value "$HUB_UNIT" 2>/dev/null || true)
+if [ -n "$hub_start" ]; then
+  hub_epoch=$(date -d "$hub_start" +%s)
+  for d in "$LOGS"/request-log-parts-*/; do
+    [ -d "$d" ] || continue
+    [ -z "$(find "$d" -newermt "@$hub_epoch" -print -quit)" ] || continue
+    mkdir -p "$RUN/files/orphaned-parts"
+    mv "${d%/}" "$RUN/files/orphaned-parts/"
+  done
+fi
+count=$(find "$RUN/files" -type f | wc -l)
+if [ "$count" -eq 0 ]; then rm -rf "$RUN"; note "nothing new to archive"; exit 0; fi
+raw=$(du -sb "$RUN/files" | cut -f1)
+
+# 3. Pack oldest first, so a thread's turns sit next to each other inside the zstd window.
+LIST="$RUN/order"
+(cd "$RUN/files" && find . -type f -printf '%T@ %P\n' | sort -n | cut -d' ' -f2-) > "$LIST"
+ARCHIVE="$RUN/cliproxy-logs-$RUN_ID.tar.zst"
+tar -C "$RUN/files" -cf - -T "$LIST" | zstd -q -19 --long=30 -T4 -o "$ARCHIVE" || die "packing $RUN_ID failed"
+
+# 4. Verify before deleting anything: the stream decodes and holds every file.
+packed=$(zstd -dc --long=30 "$ARCHIVE" | tar -tf - | wc -l) || die "$ARCHIVE does not decode"
+[ "$packed" -eq "$count" ] || die "$ARCHIVE holds $packed files, expected $count"
+rm -rf "$RUN/files" "$LIST"
+touch "$RUN/PACKED"
+size=$(stat -c %s "$ARCHIVE")
+note "packed $count requests, $(numfmt --to=iec "$raw") -> $(numfmt --to=iec "$size")"
+
+# 5. Upload, then drop the local copy.
+upload_run "$RUN"
+note "done"

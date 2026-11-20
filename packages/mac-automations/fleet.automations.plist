@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- install.sh replaces __HOME__ and __AUTOMATIONS__ and copies this to ~/Library/LaunchAgents/.
+     Hourly at :30: hourly tools every fire, daily tools on the first fire at or after 23:30. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>fleet.automations</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Library/Application Support/automations/Automations</string>
+    <string>__AUTOMATIONS__/run-all.sh</string>
+    <string>--scheduled</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key><string>__AUTOMATIONS__/dispatcher.log</string>
+  <key>StandardErrorPath</key><string>__AUTOMATIONS__/dispatcher.log</string>
+</dict>
+</plist>

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# screenshare: on a Mac with Sill installed, Sill is running so the phone can reach this screen.
-# Heals by clearing quarantine and relaunching it. Nothing to check elsewhere.
+# sill: on a Mac with Sill installed, Sill is running so the phone can reach this screen.
+# Heals by clearing quarantine and relaunching it in the background. Nothing to check elsewhere.
 APP=/Applications/Sill.app
 [ "$(uname -s)" = Darwin ] && [ -d "$APP" ] || exit 0
 if [ "${1:-}" = --heal ]; then

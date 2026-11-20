@@ -65,7 +65,7 @@ Ask these in one message, with sensible defaults I can accept by saying "default
 
 Show me the plan back as a table (machine, role, OS, packages, harnesses, T3 channel) and a list
 of the accounts I picked, then wait for my yes. Recommend `accounts` on every machine, and
-`postdraft` and `screenshare` (controller with a headless worker) if they fit.
+`postdraft` and `halo` (controller with a headless worker) if they fit.
 
 ## Phase 2: create my fleet repo
 

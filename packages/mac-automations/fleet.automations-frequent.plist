@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- install.sh replaces __HOME__ and __AUTOMATIONS__ and copies this to ~/Library/LaunchAgents/.
+     Every minute: only tools whose cadence file says "every <N>m". -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>fleet.automations-frequent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Library/Application Support/automations/Automations</string>
+    <string>__AUTOMATIONS__/run-all.sh</string>
+    <string>--frequent</string>
+  </array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__AUTOMATIONS__/dispatcher.log</string>
+  <key>StandardErrorPath</key><string>__AUTOMATIONS__/dispatcher.log</string>
+</dict>
+</plist>

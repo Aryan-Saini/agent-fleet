@@ -12,17 +12,20 @@ This repo is the kit: a few small portable commands, opt-in packages, agent skil
 you hand to your own agent to build your fleet on whatever machines you have.
 
 ```
-            phone  (T3 Code app, ssh app)
-              |  T3 Connect relay / Tailscale
-   +----------+-----------------------------------------+
-   |                    tailnet                          |
-   |   controller (laptop)           worker (always on)  |
-   |   - you work here      ssh -->  - agents in tmux     |
-   |   - authors config    <-- ssh   - health watchdog    |
-   |   - /fleet-update               - config sync        |
-   |        \                        /                    |
-   |         +--- ~/drop (Syncthing)+                     |
-   +-----------------------------------------------------+
+              phone  (T3 Code app)
+                |  T3 Connect relay / Tailscale
+   +------------+-------------------------------------------------+
+   |                         tailnet                               |
+   |   controller (laptop, leader)        worker (always on)       |
+   |   - you work here         ssh -->    - agents: tmux, T3       |
+   |   - authors all config   <-- ssh     - CLIProxyAPI hub        |
+   |   - nightly /fleet-update            - worker-chrome, Halo    |
+   |   - signed automation runner         - dev servers over HTTPS |
+   |   - Cua Driver computer use          - watchdog, backups      |
+   |            \                          /                       |
+   |             +-- git: controller pushes, worker resets /30m --+|
+   |             +-- T3 environment links: threads either way ---+|
+   +---------------------------------------------------------------+
 ```
 
 ## Get started
@@ -38,9 +41,9 @@ again later to add a machine or a tool.
 ```bash
 gh repo create <you>/fleet --private --template Aryan-Saini/agent-fleet --clone
 cd fleet
-./install.sh --role controller --packages "tailscale drop-folder"
+./install.sh --role controller --packages "tailscale t3-remote mac-automations"
 # then on each worker, after cloning your fleet repo there:
-./install.sh --role worker --controller <laptop-ssh-alias> --packages "tailscale drop-folder always-on agent-clis"
+./install.sh --role worker --controller <laptop-ssh-alias> --packages "tailscale always-on agent-clis t3-remote linux-automations"
 ```
 
 Then fill in `computers.md`, and walk each package's README.
@@ -94,27 +97,53 @@ The worker may lose the current task. It may never stay down or stay silent.
 [`packages/os-update`](packages/os-update/) is the worked example: full OS upgrades with a
 snapshot, a reboot, and a report.
 
-## Screenshots and files
+## Screens, browsers and files
 
-An agent on a headless box can't see your clipboard, and pasting doesn't cross ssh. So my
-screenshot tool saves into a folder that Syncthing mirrors to `~/drop` on every machine.
-Screenshot, wait ~20 seconds, and tell the agent `look at ~/drop/Shot-0412.png`. Anything the
-worker writes to `~/drop` (reports, captures, alerts) comes back the same way.
+An agent on a headless box can't see your clipboard, and pasting doesn't cross ssh. Files move
+with `to-worker file.png` / `to-controller file.png` (thin wrappers over `fleet send`) or as T3
+attachments. I used to mirror a Syncthing `~/drop` folder everywhere; it is still in
+[`packages/drop-folder`](packages/drop-folder/) as an option, but I retired it.
 
-When the next step can't wait: `fleet send worker file.png`. When a human has to click something
-on the worker (a login, 2FA, a captcha): `screenshare` opens the worker's browser on the
-controller over the tailnet. When an agent must drive the controller's own screen: the
-`control-computer` skill, with [Peekaboo](packages/peekaboo/) as a vendor-neutral option.
+- **A human has to click something on the worker** (a login, 2FA, a captcha):
+  [`halo`](packages/halo/) brings up a screen, Chrome, a voxl browser viewer and a RustDesk
+  fallback on the worker and opens it on the controller, firewalled to the tailnet.
+- **Agents need a real browser on the worker:** [`worker-chrome`](packages/worker-chrome/) keeps
+  one logged-in Chrome running; the `playwright` and `chrome-devtools` MCP servers attach to it.
+- **An agent must drive the controller's own apps:** the `control-computer` skill, built on
+  [Cua Driver](packages/cua-driver/) (background, accessibility-tree first), with
+  [Peekaboo](packages/peekaboo/) as the fallback.
+- **You want the Mac on your phone:** [Sill](packages/sill/). **An agent needs the phone itself:**
+  [phoneuse](packages/phoneuse/).
 
 ## Multiple harnesses, multiple models
 
-I use Claude Code day to day, Codex for OpenAI models and for computer use, opencode for cheap
+I use Claude Code day to day inside T3 Code, Codex for OpenAI models, opencode for cheap
 open-weight models through OpenRouter, and Cursor when I am in an editor. They all read the same
 rules. The [`subagents`](skills/subagents/SKILL.md) skill holds a table ranking every model I can
 reach by cost, intelligence and taste, and routes work by it: cheap models for mechanical work,
 taste for anything a user sees, and a "council" of models from different vendors to review a diff
 independently. [`codex-implementation`](skills/codex-implementation/SKILL.md) hands a scoped
-change to Codex and has Claude review the patch.
+change to Codex and has Claude review the patch. Every Claude Code and Codex on the fleet routes
+through one [CLIProxyAPI hub](packages/cliproxy/) on the worker, and the controller falls back to
+its own logins within three minutes if the hub goes down.
+
+[T3 Code](docs/t3-code.md) is the glue: the desktop app on the controller, a service on the
+worker, the phone through T3 Connect, and environment links so a thread or a subagent on one
+machine can run on the other.
+
+## How it is wired
+
+| doc | what |
+| --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | leader and worker, every channel between them, work orders, sudo on both sides |
+| [`docs/sync.md`](docs/sync.md) | every sync path: global rules files, skills, the fleet repo, settings, secrets |
+| [`docs/skills.md`](docs/skills.md) | one copy of each skill for every harness, and the metadata header that says who gets it |
+| [`docs/automations.md`](docs/automations.md) | both scheduler designs and every automation I run, with why |
+| [`docs/t3-code.md`](docs/t3-code.md) | T3 Code across controller, worker and phone |
+| [`docs/storage.md`](docs/storage.md) | the worker's disks: btrfs system, XFS on LVM/VDO work volume, ext4 snapshots, a read-only vault |
+| [`docs/communicate.md`](docs/communicate.md) | cross-machine cookbook: commands, agents, files, services |
+| [`docs/harnesses.md`](docs/harnesses.md) | what Claude Code, Codex, Cursor and opencode each read |
+| [`docs/porting.md`](docs/porting.md) | each piece on macOS, Linux and Windows |
 
 ## What's here
 
@@ -126,46 +155,71 @@ change to Codex and has Claude review the patch.
 | [`skills/`](skills/), [`skills-controller/`](skills-controller/), [`skills-worker/`](skills-worker/) | agent skills, linked by role |
 | [`templates/`](templates/) | your `computers.md`, rules, machine READMEs, automations registry, incident format |
 | [`units/`](units/) | systemd and launchd units for the worker loop |
-| [`docs/`](docs/) | skills and symlinks, cross-machine cookbook, harness wiring, porting to other OSes |
+| [`docs/`](docs/) | how it is wired, see the table above |
 | [`examples/author/`](examples/author/) | my own fleet, anonymized, as a reference |
 
 ### Packages
 
-| package | what |
-| --- | --- |
-| [tailscale](packages/tailscale/) | private network and ssh from anywhere |
-| [drop-folder](packages/drop-folder/) | `~/drop` synced everywhere |
-| [always-on](packages/always-on/) | never sleep, survive power loss, run headless |
-| [accounts](packages/accounts/) | every login and API key you need, and `fleet secrets push` for keys |
-| [agent-clis](packages/agent-clis/) | catch expired agent logins before an agent fails |
-| [t3-remote](packages/t3-remote/) | install T3 Code, stable or nightly, and drive agents from your phone |
-| [postdraft](packages/postdraft/) | agents publish plans and files as links on your own server ([npm](https://www.npmjs.com/package/postdraft)) |
-| [screenshare](packages/screenshare/) | see and click a browser on a headless box ([npm](https://www.npmjs.com/package/screenshare-tunnel)), and your Mac from your phone with Sill |
-| [worker-chrome](packages/worker-chrome/) | one real, logged-in Chrome on each worker that agents drive ([npm](https://www.npmjs.com/package/worker-chrome)) |
-| [peekaboo](packages/peekaboo/) | let an agent drive a Mac's screen |
-| [vorssaint](packages/vorssaint/) | the free menu bar toolkit I run all day, from the release or your own fork |
-| [mcp](packages/mcp/) | MCP servers on every machine without per-machine logins |
-| [os-update](packages/os-update/) | OS upgrades as reboot-safe work orders |
+| package | for | what |
+| --- | --- | --- |
+| [tailscale](packages/tailscale/) | every machine | the private network, ssh from anywhere, `serve` for HTTPS, sharing across tailnets |
+| [drop-folder](packages/drop-folder/) | every machine | `~/drop` on every machine; `to-worker` / `to-controller` push files, Syncthing optional |
+| [always-on](packages/always-on/) | workers | never sleep, come back after power loss, run headless |
+| [agent-clis](packages/agent-clis/) | workers | catch expired Claude, Codex, Cursor, opencode and gh logins |
+| [accounts](packages/accounts/) | every machine | which logins and API keys you need, and how keys reach every machine |
+| [settings-sync](packages/settings-sync/) | every machine | Claude, Codex and T3 settings shared one way with per-machine overlays; `repo-sync` for no-PR repos |
+| [mcp](packages/mcp/) | every machine | MCP servers without per-machine logins: keys global, definitions per project, trust per machine |
+| [t3-remote](packages/t3-remote/) | workers, controllers | T3 Code as a service, phone access, controller and worker linked to each other |
+| [cliproxy](packages/cliproxy/) | worker + controller | one CLIProxyAPI hub for every Claude and Codex account, failover, request log archive |
+| [mac-automations](packages/mac-automations/) | macOS | every scheduled job through one signed runner granted Full Disk Access once |
+| [linux-automations](packages/linux-automations/) | Linux workers | one systemd user timer per job, `Persistent=true` where downtime matters |
+| [agent-history-backup](packages/agent-history-backup/) | every machine | every agent conversation kept forever in restic on S3, with a restore helper |
+| [dev-server](packages/dev-server/) | workers | run a web app on the worker, open it over tailnet HTTPS from anywhere, reaped after 24h |
+| [postdraft](packages/postdraft/) | every machine | agents publish plans, reports and files as links, on your own Convex server (npm) |
+| [halo](packages/halo/) | controller + headless worker | see and click a worker's screen from the controller: Xvfb, voxl, RustDesk, a screen pool (npm) |
+| [sill](packages/sill/) | macOS + phone | any window on your Mac on your iPhone or iPad, over Tailscale, kept running |
+| [worker-chrome](packages/worker-chrome/) | workers | one real, logged-in Chrome that agents drive instead of headless Chromium (npm) |
+| [cua-driver](packages/cua-driver/) | macOS controllers | agents drive native apps in the background, CLI and MCP (trycua) |
+| [peekaboo](packages/peekaboo/) | macOS | let an agent see and click the real screen, fallback for cua-driver |
+| [phoneuse](packages/phoneuse/) | headless worker + phone | agents see and tap a real iPhone over AirPlay and Bluetooth (spec) |
+| [vorssaint](packages/vorssaint/) | macOS controllers | free menu bar toolkit, from the release or your own fork's build |
+| [os-update](packages/os-update/) | workers | OS upgrades as reboot-safe work orders |
 
 ### Skills
 
-| skill | where | origin | what |
-| --- | --- | --- | --- |
-| fleet | everywhere | agent-built | answer questions about the machines from the docs, not from guesses |
-| worker | everywhere | agent-built | operate a worker: connect, tmux, files, services, agents across machines |
-| automation | everywhere | agent-built | add a scheduled job the native way, versioned and verified |
-| edit-md-files | everywhere | agent-built | where a new rule or skill belongs, and how it ships |
-| subagents | everywhere, Claude, Codex, opencode | agent-built | model routing, other harnesses, the review council |
-| codex-implementation | everywhere, Claude | hand-crafted | delegate a scoped change to Codex, review the diff |
-| file-pr | everywhere | hand-crafted | PRs with a plain-language problem statement first |
-| unslop, technical-writing | everywhere | hand-crafted | writing rules that cut AI tells |
-| fleet-update | controller | agent-built | update every machine from its enabled packages, safely |
-| fleet-add-device | controller | agent-built | onboard a machine, verified by running |
-| control-computer | controller, Claude, macOS | hand-crafted | cheapest-first routing for GUI work, Codex Computer Use and Peekaboo |
-| screenshare-tunnel | with `screenshare` | hand-crafted | get a human onto a worker's browser. Ships in the npm package |
-| html-communication, file-upload, send-file-link, request-upload-link | with `postdraft` | hand-crafted | publish docs, screenshots and files as links. Ship in the npm package |
-| worker-chrome | with `worker-chrome` | hand-crafted | drive the worker's always-on, logged-in Chrome. Ships in the npm package |
-| capture | worker, Linux | hand-crafted | screenshots and video with no display |
+| skill | scope | what |
+| --- | --- | --- |
+| fleet, worker | everywhere | answer from the docs; operate the worker: connect, tmux, files, services |
+| automation | everywhere | add a scheduled job the native way for that machine, versioned and verified |
+| edit-md-files | everywhere | where a new rule or skill belongs, and how it ships |
+| subagents | everywhere | model routing table, delegation inside and outside T3, the review council |
+| codex-implementation | everywhere, Claude | delegate a scoped change to Codex, review the diff |
+| t3-environment-handoff | everywhere, Claude | move a thread or worktree to the other machine's T3 |
+| dev-server | everywhere | run a web app on the worker and hand back a tailnet HTTPS link |
+| cliproxy-hub | everywhere | accounts, limits and resets on the shared CLIProxyAPI hub |
+| create-project, remove-project | everywhere | register a repo in T3 on both machines; retire and archive one |
+| npm-publish | everywhere | publish packages from any machine, handle EOTP |
+| calendar | everywhere | Apple and Google calendars, a team availability mirror, week planning |
+| messages | everywhere | read iMessage history from the controller; send only when told |
+| file-pr | everywhere | PRs with a plain-language problem statement first |
+| unslop, technical-writing | everywhere | writing rules that cut AI tells (from poteto's pstack) |
+| codebase-design, improve-codebase-architecture, domain-modeling | everywhere | deep modules, seams, glossary and ADRs (from Matt Pocock) |
+| grilling, grill-me, grill-with-docs, handoff | everywhere | stress-test a plan; hand a session to the next agent (from Matt Pocock) |
+| recall, find-skills | everywhere | search past agent sessions; find installable skills |
+| ui-craft, ui-stress-shots | everywhere | Emil Kowalski's UI and motion guides as a router; worst-case UI screenshots |
+| content-principles | everywhere | pointer to aiwithremy's short-form content principles |
+| audio-analyzer, video-downloader, spotify | everywhere | transcribe recordings; download video; play music anywhere |
+| control-computer | controller, Claude, macOS | GUI work through Cua Driver, Peekaboo as fallback |
+| codex-image-creation | controller | generate and edit images through Codex via the hub, or an OpenAI key |
+| fleet-update, fleet-add-device | controller | update every machine safely; onboard a machine |
+| phoneuse, reminders-mac | controller | drive a real iPhone; Apple Reminders |
+| capture, reminders-worker | worker | screenshots and video with no display; Reminders via the controller |
+| halo, worker-chrome, html-communication, file-upload, send-file-link, request-upload-link | with their npm package | ship inside `fleet-halo`, `worker-chrome` and `postdraft` |
+
+Every `SKILL.md` opens with a `metadata` block (`harness`, `platform`, `scope`, `requires`) that
+says which harnesses and OSes get it and what it needs on the machine. Most of these are
+**skeletons** of the skills I run daily: the real structure, commands and lessons, with
+`<placeholders>` where my values were. Copy the parts you want.
 
 ## Any OS
 
@@ -182,8 +236,11 @@ Windows, and the setup prompt tells your agent to port anything your machines ne
 - Logins are per machine: agent CLIs, `gh` and T3 are logged in by hand on each box and never
   copied. Static API keys are edited on the controller and sent to workers over ssh with
   `fleet secrets push`. See [`packages/accounts`](packages/accounts/).
-- Nothing listens on a public port. Tailscale carries everything; `screenshare` firewalls its
-  port to the tailnet; a random password per worker never leaves your machines.
+- Nothing listens on a public port. Tailscale carries everything; Funnel stays off; `halo`
+  firewalls its ports to the tailnet; dev servers bind loopback and are reached only through
+  `tailscale serve`.
+- Unattended root: passwordless sudo on the worker only; the controller's password stays in the
+  login Keychain behind a `SUDO_ASKPASS` helper. See [`docs/architecture.md`](docs/architecture.md).
 
 ## How this was built
 
@@ -194,8 +251,9 @@ over it.
 
 Some skills are **hand-crafted**: I wrote and tuned them over months of daily use, and they ship
 here close to how I run them. Others are **agent-built**: generalized or written fresh by agents
-for this repo, from my private versions. The skills table marks which is which. Treat the
-agent-built ones as solid starting points and expect to tune them, the same way I tuned mine.
+for this repo, from my private versions, and most skills here are skeletons of mine with my
+values swapped for placeholders. Treat them as solid starting points and expect to tune them,
+the same way I tuned mine.
 
 ## Credits
 
@@ -205,11 +263,14 @@ Ideas and tools this setup leans on, and the people behind them:
   [T3 Code](https://github.com/pingdotgg/t3code) and T3 Connect, which is how my phone drives the
   fleet.
 - **[Matt Pocock](https://github.com/mattpocock)**, for how I think about TypeScript and about
-  writing [skills for agents](https://github.com/mattpocock/skills).
+  writing [skills for agents](https://github.com/mattpocock/skills); several skills here are his.
+- **[Emil Kowalski](https://emilkowal.ski)**, for the UI and motion craft behind `ui-craft`.
+- **[trycua](https://github.com/trycua/cua)**, for Cua Driver.
+- **[router-for-me](https://github.com/router-for-me/CLIProxyAPI)**, for CLIProxyAPI.
 - **[Ben Davis](https://github.com/bmdavis419)** ([davis7.sh](https://www.davis7.sh)), for ideas
   and inspiration.
 - **Lauren ([poteto](https://x.com/poteto))** ([GitHub](https://github.com/poteto)), for ideas
-  and inspiration.
+  and inspiration, and the pstack skills behind `unslop`, `technical-writing` and `recall`.
 
 ## License
 

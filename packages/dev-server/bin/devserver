@@ -1,0 +1,12 @@
+#!/bin/sh
+# devserver: runs one dev server for devserver@<name>.service (ExecStart=%h/.local/bin/devserver %i).
+# Sources ~/.config/devservers/<name>.conf, written by worker-expose: DIR (where to run), PORT and
+# CMD (one shell string). PORT and HOST=127.0.0.1 are exported for frameworks that read them.
+# systemd reads no shell profile, so PATH is set here; add your node manager's bin if it lives
+# elsewhere.
+set -eu
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+. "$HOME/.config/devservers/$1.conf"
+export PORT HOST=127.0.0.1
+cd "$DIR"
+exec /bin/sh -c "$CMD"

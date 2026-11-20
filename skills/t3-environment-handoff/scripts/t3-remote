@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# t3-remote: call a tool on the OTHER machine's T3 Code MCP server, bypassing Claude's MCP client.
+# Fallback for when the t3-<peer> MCP server failed to connect. Reuses Claude Code's existing
+# OAuth sign-in for that server and connects over the peer's tailnet IPv6 address, which still
+# works when the local Tailscale IPv4 route is missing.
+#
+#   T3_PEER_SERVER=t3-<peer> T3_PEER_HOST=<peer tailnet name> T3_TAILNET=<tailnet>.ts.net \
+#     t3-remote <tool> '<json-args>'       e.g. t3-remote t3_project_list '{"limit":100}'
+#
+# Prints the tool's text result (usually JSON).
+set -euo pipefail
+tool=${1:?tool name}; args=${2:-'{}'}
+server=${T3_PEER_SERVER:?set T3_PEER_SERVER, the MCP server name in Claude Code}
+host=${T3_PEER_HOST:?set T3_PEER_HOST, the peer machine name on the tailnet}
+fqdn="$host.${T3_TAILNET:?set T3_TAILNET, e.g. <tailnet>.ts.net}"
+
+# Claude Code keeps MCP OAuth tokens in the Keychain on macOS and in a file on Linux.
+if [ "$(uname)" = Darwin ]; then
+  creds=$(security find-generic-password -s "Claude Code-credentials" -w)
+else
+  creds=$(cat "$HOME/.claude/.credentials.json")
+fi
+tok=$(jq -r --arg s "$server|" '.mcpOAuth | to_entries[] | select(.key | startswith($s)) | .value.accessToken' <<<"$creds" | head -1)
+[ -n "$tok" ] || { echo "t3-remote: no $server sign-in found. Run: claude mcp login $server" >&2; exit 1; }
+ip6=$(tailscale ip -6 "$host")
+
+url="https://$fqdn/mcp"
+c=(-sS --max-time 300 --resolve "$fqdn:443:[$ip6]" -H "Authorization: Bearer $tok"
+   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream')
+hdr=$(mktemp); trap 'rm -f "$hdr"' EXIT
+curl "${c[@]}" -D "$hdr" -o /dev/null "$url" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t3-remote","version":"1"}}}'
+sid=$(awk 'tolower($1)=="mcp-session-id:"{print $2}' "$hdr" | tr -d '\r')
+[ -n "$sid" ] && c+=(-H "mcp-session-id: $sid" -H "mcp-protocol-version: 2025-06-18")
+curl "${c[@]}" -o /dev/null "$url" -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+jq -n --arg t "$tool" --argjson a "$args" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$t,arguments:$a}}' \
+  | curl "${c[@]}" "$url" -d @- \
+  | sed -n 's/^data: //p; /^{/p' \
+  | jq -r 'if .error then "ERROR: \(.error | tostring)" else (.result.content[0].text // (.result | tostring)) end'

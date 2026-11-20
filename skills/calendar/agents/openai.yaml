@@ -1,0 +1,5 @@
+interface:
+  display_name: "Calendar"
+  short_description: "Plan the week and publish availability"
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,18 @@
+# One dev server per instance: devserver@<name>. Managed by worker-expose, never by hand.
+[Unit]
+Description=Dev server %i (worker-expose, HTTPS over Tailscale)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/devserver %i
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# Dev servers run arbitrary npm code. If sudo is passwordless on the worker, this is what stops
+# a dependency from using it.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# move-worktree: copy the current checkout (branch commits + uncommitted and untracked changes) into
+# a new git worktree on the OTHER machine, ready for t3_thread_launch with existing_worktree.
+# Nothing in the source checkout is changed. Gitignored files (.env etc.) are not copied; the
+# target's worktree setup script copies them from its own main checkout and installs dependencies.
+#
+#   T3_PEER_SSH=<ssh alias of the other machine> move-worktree <target-repo-root> [branch]
+#
+# target-repo-root is the project's workspaceRoot from the other machine's t3_project_list.
+# branch defaults to the current branch. Prints the target worktree path on the last line.
+# T3_WORKTREE_SETUP (optional) is the setup script on the target, run with T3's env vars.
+set -euo pipefail
+root=${1:?target repo root}
+branch=${2:-$(git rev-parse --abbrev-ref HEAD)}
+host=${T3_PEER_SSH:?set T3_PEER_SSH to the ssh alias of the other machine}
+setup=${T3_WORKTREE_SETUP:-'$HOME/fleet/bin/t3-worktree-setup'}  # expanded on the target
+[ "$branch" != HEAD ] || { echo "move-worktree: detached HEAD, pass a branch name" >&2; exit 1; }
+
+# Snapshot the working tree as a commit on top of HEAD, via a throwaway index.
+idx=$(mktemp); trap 'rm -f "$idx"' EXIT
+GIT_INDEX_FILE=$idx git read-tree HEAD
+GIT_INDEX_FILE=$idx git add -A
+snap=$(git commit-tree "$(GIT_INDEX_FILE=$idx git write-tree)" -p HEAD -m "handoff snapshot")
+
+# Push the branch (no force: a diverged branch on the target stops here) and the snapshot.
+git push "$host:$root" "HEAD:refs/heads/$branch" "$snap:refs/handoff/$branch"
+
+wt="\$HOME/.t3/worktrees/$(basename "$root")/${branch//\//-}"
+ssh "$host" bash -s <<REMOTE
+set -euo pipefail
+cd "$root"
+wt="$wt"
+git worktree add "\$wt" "$branch"
+cd "\$wt"
+git diff --binary HEAD "refs/handoff/$branch" | git apply --allow-empty
+git update-ref -d "refs/handoff/$branch"
+if [ -x "$setup" ]; then
+  T3CODE_PROJECT_ROOT="$root" T3CODE_WORKTREE_PATH="\$wt" "$setup" >/tmp/t3-handoff-setup.log 2>&1 \
+    || echo "move-worktree: setup failed, see /tmp/t3-handoff-setup.log on $host" >&2
+fi
+git status --short | head -20
+echo "\$wt"
+REMOTE

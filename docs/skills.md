@@ -46,23 +46,60 @@ Delete the link and the real folder is untouched. Delete the real folder and the
 ```
 
 When the same skill name exists in several places, the most specific copy wins:
-`skills-local/`, then `skills-<role>/`, then `skills/`. Kit upgrades never touch
-`skills-local/`, so personalize a kit skill by copying it there.
+`skills-local/`, then `skills-<role>/`, then `skills/`, then the `skills/` folder of an npm
+package an enabled kit package ships as. Kit upgrades never touch `skills-local/`, so personalize
+a kit skill by copying it there. A few kit skills (`halo`, `cua-driver`) are short pointers to a
+skill that ships with the tool itself; they tell the agent where to read the real one.
 
-Each `SKILL.md`'s frontmatter decides where it is linked:
+Each `SKILL.md`'s frontmatter says who can use it. See the next section.
+
+## The metadata block
+
+Every skill in this kit opens with the same four keys under `metadata`:
 
 ```yaml
 ---
-name: subagents
-description: When delegating work to another agent or model. READ THIS before delegating.
+name: dev-server
+description: Run a web app's dev server on a worker and hand the user a tailnet HTTPS link...
 metadata:
-  harness: [claude, codex, opencode]   # which harness folders get a link; omit for all four
-  platform: [darwin, linux]            # skipped on any other OS
+  harness: [claude, codex, cursor, opencode]
+  platform: [darwin, linux]
+  scope: fleet
+  requires: "worker-expose on the worker, Tailscale with HTTPS certificates enabled, jq"
 ---
 ```
 
-Harnesses don't read these keys. `fleet link` does. A skill is kept out of a harness by never
-linking it into that harness's folder.
+| key | means | allowed values | who reads it |
+| --- | --- | --- | --- |
+| `harness` | which agent harnesses get the skill | any of `claude`, `codex`, `cursor`, `opencode`. Omit for all four | `fleet link` |
+| `platform` | which operating systems it works on | any of `darwin`, `linux` (add `windows` if you port one). Omit for any | `fleet link` |
+| `scope` | which machine role it belongs to | exactly one of `fleet`, `controller`, `worker` | you and agents; it must match the folder |
+| `requires` | what has to be installed or set up on the machine for the skill to work | free text, one line | you and agents |
+
+**`harness` and `platform`.** `fleet link` reads both lists. A skill whose `platform` doesn't
+include this machine's OS is not linked at all. Otherwise it is linked into each listed harness's
+folder: `claude` into `~/.claude/skills/`, `codex` into `~/.codex/skills/`, and `cursor` or
+`opencode` into `~/.agents/skills/` (both read that one folder). Harnesses never see these keys;
+a skill stays out of a harness by never being linked there. That is how `control-computer`
+(`harness: [claude]`, `platform: [darwin]`) exists only for Claude Code on a Mac.
+
+**`scope`.** The folder is what enforces role, and `scope` names it:
+
+| `scope` | folder | linked on |
+| --- | --- | --- |
+| `fleet` | `skills/` | every machine |
+| `controller` | `skills-controller/` | controllers only |
+| `worker` | `skills-worker/` | workers only |
+
+`fleet link` picks folders by the machine's role (`skills/` plus `skills-<role>/`), so a
+controller skill is not merely switched off on a worker, it is absent. Keep `scope` and the folder
+in agreement: the key is how a skill read out of context (in a PR, on GitHub, pasted into a chat)
+says where it belongs. A skill in `skills-local/` uses whichever scope it really has.
+
+**`requires`.** Documentation, not enforcement. It tells a human installing the skill, and an
+agent about to use it, what must already exist on the machine: a CLI on PATH, a login, an ssh
+alias, a permission grant, a file such as `~/.npmrc` (never its contents). When a skill fails, this
+line is the first thing to check. Write it so someone can turn it into a checklist.
 
 ## Set it up
 
@@ -84,7 +121,7 @@ Always on the controller:
 
 ```bash
 mkdir -p ~/fleet/skills-local/my-skill
-$EDITOR ~/fleet/skills-local/my-skill/SKILL.md    # name, description, then the instructions
+$EDITOR ~/fleet/skills-local/my-skill/SKILL.md    # name, description, metadata, then the instructions
 fleet link                                        # links it on this machine
 git -C ~/fleet add -A && git -C ~/fleet commit -m "feat(skills): my-skill" && git -C ~/fleet push
 ```
@@ -111,6 +148,32 @@ so you can recover it from there.
 This scales without extra work. Ten workers or one, each one pulls the same commit and links the
 same skills for its role and OS. Adding a worker means cloning the repo and running
 `./install.sh --role worker`.
+
+## How the author actually syncs
+
+The kit above keeps skills in the fleet repo. The author's private setup predates it and works the
+same way with different plumbing. It is worth knowing because every rule carries over.
+
+- **One copy.** A private git repo (`dotagents`) is checked out directly at `~/.agents`. Its
+  `skills/` folder is the only real copy of every shared skill, and `skills-worker/` holds the
+  worker-only ones.
+- **Symlinks everywhere else.** `~/.claude/skills/<name>` is a symlink
+  (`../../.agents/skills/<name>`), tracked in its own small config repo checked out at `~/.claude`.
+  Codex and Cursor do the same. opencode and Cursor read `~/.agents/skills/` directly. Each config
+  repo uses an allowlist `.gitignore` (ignore `*`, re-include only config), so a checkout can sit
+  on top of a folder full of credentials.
+- **Workers reset onto origin every 30 minutes.** A timer on each worker fetches every config repo
+  and runs `git reset --hard origin/main`, after saving any local edit to a `refs/<worker>-local/*`
+  ref. Workers never push. A skill edited on a worker survives until the next sync, then it's gone.
+- **Scope is enforced at sync time.** The sync reads each skill's `scope` and `platform` and turns
+  them into Claude Code `skillOverrides`, switching off a controller skill on a worker. Worker-only
+  skills are linked in from `skills-worker/` on workers only.
+- **Edit only on the controller, and commit and push in the same pass.** An unpushed commit is
+  invisible to every worker. A shell helper (`dotpush "<message>"`) commits and pushes every dirty
+  config repo at once, and `dotstatus` shows what is dirty. After a change a worker needs now,
+  trigger its sync over ssh instead of waiting.
+
+The `edit-md-files` skill carries these rules for agents.
 
 ## Verify
 

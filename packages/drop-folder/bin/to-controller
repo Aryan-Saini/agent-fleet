@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# to-controller: push files from a worker to the controller's ~/drop, now, over ssh.
+#
+#   to-controller report.md             -> <controller>:~/drop/
+#   to-controller -d ~/Downloads a.zip  -> <controller>:~/Downloads/
+#
+# The controller is FLEET_CONTROLLER from machine.env (install.sh --controller sets it). Fails with
+# a hint when the controller is asleep or off the tailnet; pair it with `fleet alert` so a human
+# knows a file is waiting.
+set -euo pipefail
+self="$0"; while [ -L "$self" ]; do l="$(readlink "$self")"; case $l in /*) self=$l ;; *) self="$(dirname "$self")/$l" ;; esac; done
+# shellcheck source=/dev/null
+. "$(dirname "$self")/../../../bin/fleet-lib.sh"
+[ -n "${FLEET_CONTROLLER:-}" ] || { echo "to-controller: set FLEET_CONTROLLER in machine.env" >&2; exit 1; }
+exec fleet send "$FLEET_CONTROLLER" "$@"
